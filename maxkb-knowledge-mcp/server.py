@@ -12,7 +12,8 @@ MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
         - 工作流知识库(type=4): 先上传源文件, 再通过 upload_document 交给
           知识库工作流做智能分段(异步处理)
   3. search_knowledge   —— 直接检索知识库(命中测试), 获取知识切片
-  4. list_documents     —— 查询知识库下的文档列表
+  4. get_segment_context —— 读取命中片段的前后相邻片段(上下文扩展)或整篇文档全文
+  5. list_documents     —— 查询知识库下的文档列表
 
 传输协议(同一进程):
   * MCP Streamable HTTP:  http://<host>:<port>/mcp
@@ -32,6 +33,9 @@ MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
   - POST /workspace/{wid}/knowledge/{kid}/upload_document               工作流方式上传文档
   - POST /workspace/{wid}/knowledge/{kid}/hit_test                      命中测试/检索
   - GET  /workspace/{wid}/knowledge/{kid}/document/{page}/{size}       文档列表(分页)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph      文档分段列表(不分页, 含完整正文)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph/{p}/{s} 文档分段列表(分页)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/download_source_file 文档原始文件(仅手动上传)
   - POST /oss/file                                      上传源文件(工作流方式需要)
 
 环境变量:
@@ -48,6 +52,8 @@ MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
   MAXKB_SIMILARITY     检索默认相似度阈值, 默认 0.6
   MAXKB_SEARCH_MODE    检索默认模式 embedding|keywords|blend, 默认 blend
                     (工具入参支持中文/别名自动归一化, 非法值回退默认)
+  MAXKB_CONTEXT_NEIGHBORS get_segment_context 默认前后各扩展分段数, 默认 1
+  MAXKB_CONTEXT_MAX_CHARS get_segment_context 默认返回字符上限, 默认 6000
   HOST / PORT          监听地址与端口, 默认 0.0.0.0:8000
   MCP_AUTH_TOKEN       可选, 设置后调用 MCP 端点需要 Bearer 令牌
   MCP_ALLOWED_HOSTS    Host 白名单, 默认 * 不校验
@@ -115,6 +121,9 @@ MAXKB_TIMEOUT = float(_env("MAXKB_TIMEOUT", "120"))
 DEFAULT_TOP_NUMBER = int(_env("MAXKB_TOP_NUMBER", "5"))
 DEFAULT_SIMILARITY = float(_env("MAXKB_SIMILARITY", "0.6"))
 DEFAULT_SEARCH_MODE = _env("MAXKB_SEARCH_MODE", "blend")
+# get_segment_context 默认值: 前后各扩展几段、总量字符上限
+DEFAULT_CONTEXT_NEIGHBORS = int(_env("MAXKB_CONTEXT_NEIGHBORS", "1"))
+DEFAULT_CONTEXT_MAX_CHARS = int(_env("MAXKB_CONTEXT_MAX_CHARS", "6000"))
 
 # MaxKB v2.x HitTest 只接受 embedding|keywords|blend (报错文案的中文只是 i18n 翻译)。
 # LLM 常会传中文/别名, 这里统一归一化, 非法值回退默认, 绝不再透传给 MaxKB 触发 500。
@@ -717,7 +726,291 @@ async def search_knowledge(
             head += f" (文档: {doc})"
         lines.append(head)
         lines.append("   " + content.replace("\n", "\n   "))
+        pid, did = h.get("id"), h.get("document_id")
+        if pid and did:
+            lines.append(
+                f"   [段落ID: {pid} | 文档ID: {did} | 序号: {h.get('position', '')}]"
+            )
+    lines.append(
+        "提示: 若上面切片缺少上下文, 可调用 get_segment_context 读取命中片段的前后相邻片段或整篇文档全文。"
+    )
     return "\n".join(lines)
+
+
+_doc_names: dict[str, str] = {}
+
+
+async def _get_doc_name(ws: str, kb: str, doc_id: str) -> str:
+    """取文档名。MaxKB 分段接口(ParagraphSerializer)不返回 document_name,
+    且文档详情端点无 GET 方法, 因此从文档列表接口按 id 匹配(结果缓存)。"""
+    if not doc_id:
+        return ""
+    ck = f"{kb}:{doc_id}"
+    if ck in _doc_names:
+        return _doc_names[ck]
+    name = ""
+    try:
+        payload = await maxkb_request("GET", f"/workspace/{ws}/knowledge/{kb}/document/1/200")
+        docs, _ = page_items(payload)
+        name = next(
+            (str(d.get("name") or "") for d in docs if isinstance(d, dict) and str(d.get("id")) == doc_id),
+            "",
+        )
+    except ToolError as e:
+        log.info("获取文档名失败(不影响主流程): %s", e)
+    _doc_names[ck] = name
+    return name
+
+
+async def _fetch_paragraphs(ws: str, kb: str, doc_id: str) -> list[dict]:
+    """读取某文档的全部分段(含完整 content), 按 position 升序。
+
+    MaxKB 接口: GET /workspace/{ws}/knowledge/{kb}/document/{doc}/paragraph (不分页)
+    老版本或超大文档不支持不分页时, 自动回退到分页接口逐页抓取。
+    """
+    try:
+        payload = await maxkb_request(
+            "GET", f"/workspace/{ws}/knowledge/{kb}/document/{doc_id}/paragraph"
+        )
+        rows, _ = page_items(payload)
+        rows = [r for r in rows if isinstance(r, dict)]
+        if rows:
+            rows.sort(key=lambda r: (r.get("position") or 0, str(r.get("create_time") or "")))
+            return rows
+    except ToolError as e:
+        log.info("不分页分段接口不可用, 回退分页抓取: %s", e)
+
+    rows: list[dict] = []
+    page, size, guard = 1, 100, 0
+    while guard < 60:  # 最多 6000 段, 防止无限循环
+        guard += 1
+        try:
+            payload = await maxkb_request(
+                "GET",
+                f"/workspace/{ws}/knowledge/{kb}/document/{doc_id}/paragraph/{page}/{size}",
+            )
+        except ToolError:
+            break
+        batch, total = page_items(payload)
+        batch = [b for b in batch if isinstance(b, dict)]
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(rows) >= int(total or 0) or len(batch) < size:
+            break
+        page += 1
+    rows.sort(key=lambda r: (r.get("position") or 0, str(r.get("create_time") or "")))
+    return rows
+
+
+async def _locate_by_paragraph_id(ws: str, kb: str, paragraph_id: str) -> tuple[str, list[dict], int] | None:
+    """仅有段落 ID 时, 遍历知识库下文档定位其所属文档与序号(最多扫描 200 个文档)。"""
+    try:
+        payload = await maxkb_request(
+            "GET", f"/workspace/{ws}/knowledge/{kb}/document/1/200"
+        )
+        docs, _ = page_items(payload)
+    except ToolError:
+        docs = []
+    for d in docs:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        doc_id = str(d["id"])
+        if d.get("name"):
+            _doc_names[f"{kb}:{doc_id}"] = str(d["name"])
+        rows = await _fetch_paragraphs(ws, kb, doc_id)
+        for idx, r in enumerate(rows):
+            if str(r.get("id")) == paragraph_id:
+                return doc_id, rows, idx
+    return None
+
+
+def _build_context_window(
+    rows: list[dict], center_idx: int, neighbors: int, max_chars: int
+) -> tuple[list[tuple[int, dict]], int, int]:
+    """以 center_idx 为中心向前后各取 neighbors 段, 并做字符截断。
+
+    返回 (选中的 [(下标, 段落)], 窗口原始段落数, 是否发生截断 1/0)。
+    截断策略: 优先保证命中段完整, 再按"就近优先"向外扩展, 超出 max_chars 即停止。
+    """
+    n = len(rows)
+    lo = max(0, center_idx - max(0, neighbors))
+    hi = min(n - 1, center_idx + max(0, neighbors))
+    window = list(range(lo, hi + 1))
+
+    order = sorted(window, key=lambda i: abs(i - center_idx))  # 命中段 -> 近邻 -> 远邻
+    picked: set[int] = set()
+    used = 0
+    truncated = 0
+    for i in order:
+        size = len(str(rows[i].get("content") or "")) + len(str(rows[i].get("title") or ""))
+        if used + size > max_chars and picked:
+            truncated = 1
+            break
+        picked.add(i)
+        used += size
+    return [(i, rows[i]) for i in sorted(picked)], len(window), truncated
+
+
+async def get_segment_context(
+    paragraph_id: str = "",
+    document_id: str = "",
+    knowledge_base_id: str = "",
+    query: str = "",
+    neighbors: int = -1,
+    max_chars: int = 0,
+    full_document: bool = False,
+) -> str:
+    """读取某个检索片段的前后相邻片段(上下文扩展), 或读取整篇文档全文。
+
+    用途: search_knowledge 返回的切片只是文档中的一小段, 当据此回答不完整、
+    用户仍不满意时, 用本工具补齐上下文, 再重新组织回答。
+    定位方式(任选其一, 推荐第 1 种):
+      1. 传 search_knowledge 结果里标注的 段落ID + 文档ID (最准确);
+      2. 只传段落ID(paragraph_id), 程序会在知识库下逐文档查找(稍慢);
+      3. 传 document_id + full_document=true 直接读整篇文档;
+      4. 传 query, 程序先在知识库内检索一次, 取最高分片段再扩展上下文。
+    neighbors 为前后各扩展的分段数(-1 表示用环境变量默认值, 建议 1~3, 上限 20);
+    max_chars 为返回内容总字符上限(0 表示用默认值), 防止 token 暴增;
+    full_document=true 时读取整篇文档(从命中段落读到文档结尾, 仍受 max_chars 限制)。
+    注意: 仅在检索切片不足以回答时才调用本工具, 不要每次检索后都自动扩展上下文。
+    """
+    paragraph_id = (paragraph_id or "").strip()
+    document_id = (document_id or "").strip()
+    # 先做纯参数校验, 避免无谓的网络往返
+    if not paragraph_id and not document_id and not (query or "").strip():
+        raise ToolError(
+            "参数不足: 请至少提供 paragraph_id(search_knowledge 结果中的段落ID)、"
+            "document_id(配合 full_document 读全文)或 query(先检索再扩展)。"
+        )
+    ws = await get_workspace_id()
+    kb = await resolve_kb(knowledge_base_id)
+    nb = DEFAULT_CONTEXT_NEIGHBORS if neighbors < 0 else min(max(neighbors, 0), 20)
+    cap = max_chars if max_chars > 0 else DEFAULT_CONTEXT_MAX_CHARS
+
+    rows: list[dict] = []
+    center_idx = 0
+    doc_name = ""
+    hit_note = ""
+
+    # --- 方式 3 / 4 / 1 / 2 分支定位 ---
+    if not document_id and query and not paragraph_id:
+        body = {
+            "query_text": query,
+            "top_number": 1,
+            "similarity": DEFAULT_SIMILARITY,
+            "search_mode": _normalize_search_mode(""),
+        }
+        payload = await maxkb_request(
+            "POST", f"/workspace/{ws}/knowledge/{kb}/hit_test", json_body=body
+        )
+        hits = payload.get("data") or []
+        if isinstance(hits, dict):
+            hits = hits.get("records") or hits.get("list") or []
+        if not hits or not isinstance(hits[0], dict):
+            return f"未检索到与 query 相关的片段 (知识库 {kb}), 无法扩展上下文。"
+        top = hits[0]
+        document_id = str(top.get("document_id") or "")
+        paragraph_id = str(top.get("id") or "")
+        doc_name = str(top.get("document_name") or "")
+        hit_note = f"先按 query 定位到最高分片段(得分 {top.get('similarity', top.get('comprehensive_score', ''))})"
+
+    if document_id:
+        rows = await _fetch_paragraphs(ws, kb, document_id)
+        if not rows:
+            return (
+                f"该文档没有可读取的分段 (文档ID {document_id}, 知识库 {kb})。"
+                f"可能文档已被删除, 或 knowledge_base_id 与文档不匹配。"
+            )
+        if not doc_name:
+            doc_name = await _get_doc_name(ws, kb, document_id)
+        # 定位中心段落
+        if paragraph_id:
+            center_idx = next(
+                (i for i, r in enumerate(rows) if str(r.get("id")) == paragraph_id), -1
+            )
+            if center_idx < 0:
+                center_idx = 0
+                hit_note = (hit_note + " | " if hit_note else "") + "段落ID 不在该文档内, 已按首段处理"
+        else:
+            center_idx = 0
+            if not full_document:
+                hit_note = (hit_note + " | " if hit_note else "") + "未给段落ID, 默认从第 1 段起读取"
+    elif paragraph_id:
+        found = await _locate_by_paragraph_id(ws, kb, paragraph_id)
+        if not found:
+            return (
+                f"在知识库 {kb} 的文档中未找到段落ID {paragraph_id}"
+                f"(已扫描该知识库下最多 200 个文档)。"
+                f"建议同时传入 document_id(取自 search_knowledge 结果标注), 或先用 list_documents 查文档ID。"
+            )
+        document_id, rows, center_idx = found
+        doc_name = await _get_doc_name(ws, kb, document_id)
+    else:
+        # query 命中但返回体未带 document_id 的兜底
+        return (
+            f"已定位到相关片段, 但未能确定其所属文档 (知识库 {kb})。"
+            f"请改用 paragraph_id + document_id(取自 search_knowledge 结果标注)再次调用。"
+        )
+
+    # --- 组装输出 ---
+    if full_document:
+        # 从命中段起向后读完剩余全文(而非从第 1 段重来), 且不带 neighbors 窗口
+        start = center_idx if paragraph_id else 0
+        window = list(enumerate(rows))[start:]
+        total_in_window = len(window)
+        truncated = 0
+    else:
+        window, total_in_window, truncated = _build_context_window(rows, center_idx, nb, cap)
+
+    out: list[str] = [
+        f"上下文扩展 (知识库 {kb} | 文档: {doc_name or document_id or '未知'}"
+        f" | 全文 {len(rows)} 段{'' if full_document else f' | 命中第 {center_idx + 1} 段'}):"
+    ]
+    if hit_note:
+        out.append(f"  ({hit_note})")
+
+    used = 0
+    cut = False
+    for i, r in window:
+        title = str(r.get("title") or "").strip()
+        content = str(r.get("content") or "")
+        if not r.get("is_active", True):
+            tag = "[已停用]"
+        else:
+            tag = ""
+        marker = ">>> 命中片段 <<<" if (i == center_idx and not full_document) else f"第 {i + 1}/{len(rows)} 段"
+        head = f"\n--- {marker}{(' ' + title) if title else ''}{(' ' + tag) if tag else ''} ---"
+        remain = cap - used
+        if remain <= 0:
+            cut = True
+            break
+        if len(content) > remain:
+            content = content[:remain] + " …(已截断)"
+            cut = True
+        used += len(content) + len(title)
+        out.append(head)
+        out.append(content)
+
+    if cut or truncated:
+        if full_document:
+            out.append(
+                f"\n(文档共 {len(rows)} 段, 因 max_chars={cap} 限制正文未输出完整。"
+                f"如需继续, 可提高 max_chars, 或改用 neighbors 窗口只取关注的片段。)"
+            )
+        else:
+            extra = (
+                "部分分段正文被截断" if (cut and len(window) == total_in_window)
+                else f"窗口内 {total_in_window} 段中仅输出 {len(window)} 段"
+            )
+            out.append(
+                f"\n(内容不完整: {extra}, 已达字符上限 {cap}。"
+                f"如需更多, 可提高 max_chars 或缩小 neighbors 后再次调用。)"
+            )
+    if not full_document and center_idx + nb >= len(rows) - 1:
+        out.append(f"(注: 已到达文档末尾, 后续无更多分段。)")
+    return "\n".join(out)
+
 
 
 # ----------------------------------------------------------------------------
@@ -731,6 +1024,7 @@ mcp.add_tool(list_documents, name="list_documents")
 mcp.add_tool(add_segment, name="add_segment")
 mcp.add_tool(upload_document, name="upload_document")
 mcp.add_tool(search_knowledge, name="search_knowledge")
+mcp.add_tool(get_segment_context, name="get_segment_context")
 
 
 def _build_security() -> TransportSecuritySettings:
@@ -757,6 +1051,7 @@ async def health(request: Request) -> JSONResponse:
                 "add_segment",
                 "upload_document",
                 "search_knowledge",
+                "get_segment_context",
             ],
             "transports": {
                 "streamable-http": "/mcp",
@@ -835,7 +1130,7 @@ def main() -> None:
     log.info("  健康检查:  http://%s:%s/health", HOST, PORT)
     log.info("  MaxKB:     %s", BASE_URL or "未配置")
     log.info("  凭据方式:  %s", "API Key" if MAXKB_API_KEY else ("账号密码" if MAXKB_USERNAME else "未配置!!"))
-    log.info("  工具:      list_agents / list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge")
+    log.info("  工具:      list_agents / list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge / get_segment_context")
     if not BASE_URL or not (MAXKB_API_KEY or MAXKB_USERNAME):
         log.error("  !! BASE_URL 或凭据未配置, 工具调用将报错, 请检查环境变量")
     log.info("=" * 60)
