@@ -330,7 +330,7 @@ def _fmt_row(it: dict, keys: list[str]) -> str:
 # 工具实现
 # ----------------------------------------------------------------------------
 async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size: int = 20) -> str:
-    """查询 MaxKB 知识库列表。
+    """List all knowledge bases. 查询 MaxKB 知识库列表。
 
     参数 name 可按名称模糊过滤; current_page/page_size 分页。
     返回每个知识库的 id、名称、类型、描述等信息, 其中 id 可用于其他工具的 knowledge_base_id 参数。
@@ -360,7 +360,7 @@ async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size:
 async def list_documents(
     knowledge_base_id: str = "", name: str = "", current_page: int = 1, page_size: int = 20
 ) -> str:
-    """查询指定知识库下的文档列表。
+    """List all documents in a knowledge base. 查询指定知识库下的文档列表。
 
     参数 knowledge_base_id 不传时使用默认知识库; name 可按文档名过滤。
     返回文档 id、名称、状态等, 其中文档 id 可用于 add_segment 的 document_id 参数(向已有文档追加分段)。
@@ -400,7 +400,7 @@ async def add_segment(
     knowledge_base_id: str = "",
     problems: list[str] | None = None,
 ) -> str:
-    """向知识库添加一条自定义分段(方式一: 直接传入文本内容创建分段)。
+    """Create a custom text segment in a knowledge base. 向知识库添加一条自定义分段(方式一: 直接传入文本内容创建分段)。
 
     content 为分段正文(必填); title 为分段标题;
     - 指定 document_id 时: 追加到该已有文档;
@@ -611,7 +611,7 @@ async def upload_document(
     patterns: list[str] | None = None,
     with_filter: bool = True,
 ) -> str:
-    """上传整个文件到知识库并自动智能分段(方式二)。
+    """Upload a document file into the knowledge base and auto-split it into segments. 上传整个文件到知识库并自动智能分段(方式二)。
 
     文件来源二选一: file_path(服务器上的文件路径, 推荐 docker 部署时挂载目录) 或
     content_base64 + file_name(直接传文件内容, 适合小文件)。
@@ -653,7 +653,7 @@ async def search_knowledge(
     similarity: float = 0.0,
     search_mode: str = "",
 ) -> str:
-    """直接检索 MaxKB 知识库(命中测试), 返回命中的知识切片。
+    """Search the knowledge base directly (hit test) and return matched segments. 直接检索 MaxKB 知识库(命中测试), 返回命中的知识切片。
 
     query 为检索文本; top_number 返回条数(默认 5); similarity 相似度阈值(默认 0.6);
     search_mode 检索模式, 仅支持 embedding(嵌入/向量)、keywords(关键字)、blend(混合, 默认);
@@ -831,7 +831,7 @@ async def get_segment_context(
     max_chars: int = 0,
     full_document: bool = False,
 ) -> str:
-    """读取某个检索片段的前后相邻片段(上下文扩展), 或读取整篇文档全文。
+    """Read neighboring segments around a retrieved hit, or the full document text. 读取某个检索片段的前后相邻片段(上下文扩展), 或读取整篇文档全文。
 
     用途: search_knowledge 返回的切片只是文档中的一小段, 当据此回答不完整、
     用户仍不满意时, 用本工具补齐上下文, 再重新组织回答。

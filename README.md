@@ -335,7 +335,7 @@ docker compose up -d --build            # 代码/依赖变更后重新构建
 | `搜索模式:类型仅支持嵌入\|关键字\|混合` | `KB_SEARCH_MODE` 或工具入参传了非法值。默认值只能用英文 `embedding` / `keywords` / `blend`；工具入参的中文/别名会自动归一化，无法识别会回退 `blend` |
 | `未指定知识库` | 未配置 `KB_KNOWLEDGE_ID` 且调用时未传 `knowledge_base_id`。用 `list_knowledge_bases` 查到 ID 后填入 `.env` |
 | `MaxKB 认证失败 (1002/1003)` | 应用 API Key 或管理端凭据错误/过期；社区版用户级 API Key 可能不可用，改用管理员账密 |
-| LiteLLM 后台工具显示「Other / 未分类」 | LiteLLM 前端按工具名/描述中的**英文 CRUD 动词**自动分组，纯中文描述匹配不到就归为 Other。只是 UI 分组，**不影响调用**；在 `CHAT_TOOL_DESCRIPTION` 开头加 `search` / `get` 等英文动词即可归入 Read 组 |
+| LiteLLM 后台工具显示「Other / 未分类」 | LiteLLM 前端用**带 `\b` 词边界的英文动词正则**对 `工具名 → 描述` 依次匹配分组（read: `get/read/list/fetch/search/find/query/...`；create: `create/add/insert/upload/generate/write/...`；update / delete 同理）。注意：工具名里的下划线属于 word 字符，`list_knowledge_bases` 中的 `list` 后面紧跟 `_`，`\blist\b` **匹配不到**，因此纯中文描述会归为 Other。解决：描述开头写一个**后跟空格**的英文动词，如 `List all knowledge bases. 查询知识库列表。`（本仓库 6 个知识库工具已全部按此规范补齐，正常归入 Read / Create 组）。这只是 UI 分组，**不影响调用与权限** |
 | `get_segment_context` 返回「参数不足」 | 定位方式至少要传一种：`paragraph_id`+`document_id`（取自 `search_knowledge` 结果标注，最准）、单独 `paragraph_id`（会在知识库内逐文档查找，稍慢）、`document_id`（配合 `full_document`）或 `query`（先检索再扩窗） |
 | `get_segment_context` 返回「未找到段落ID」 | 段落 ID 所属知识库与 `knowledge_base_id`/`KB_KNOWLEDGE_ID` 不一致，或文档超过扫描上限（200 个）。补传 `document_id` 即可精确定位 |
 | 上下文扩展后内容仍提示「不完整」 | 属预期保护行为：达到 `max_chars`（默认 6000）即停止。确需更多再调大 `KB_CONTEXT_MAX_CHARS` 或单次传 `max_chars`，不建议长期放大 |
