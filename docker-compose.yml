@@ -32,6 +32,8 @@ services:
       # ---- 必填, 见 .env.example ----
       BASE_URL: ${MAXKB_BASE_URL:-}
       API_KEY: ${CHAT_API_KEY:-}
+      # ---- 多智能体(可选): 一个进程注册多个对话工具 ----
+      CHAT_AGENTS: ${CHAT_AGENTS:-}
       # ---- 可选, 留空则由程序使用内置默认值 ----
       SERVER_NAME: ${CHAT_SERVER_NAME:-}
       TOOL_NAME: ${CHAT_TOOL_NAME:-}

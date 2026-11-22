@@ -120,7 +120,18 @@ POST /chat/api/chat_message/{chat_id}   （同样带这个 Key）
 > 注意区分：`CHAT_API_KEY` 是**应用级**密钥（决定智能体）；`KB_API_KEY` 是**用户级**密钥（用于知识库管理接口），两者不能混用。
 
 **想切换智能体**：换 `CHAT_API_KEY` 即可。
-**想同时暴露多个智能体**：在 `docker-compose.yml` 里复制一份 `chat` 服务，各配不同的 Key、工具名和端口：
+
+**想同时对接多个智能体**（推荐，无需多个服务）：用 `CHAT_AGENTS` 在一个进程里注册多个对话工具，格式 `工具名:应用APIKey[:描述]`，多个用 `|` 分隔：
+
+```env
+# .env
+CHAT_AGENTS=ops_chat:agent-xxxxxxxx:运维专家, 回答 VMware/机房/ZStack 问题|crm_chat:agent-yyyyyyyy:客服助手, 回答产品与工单问题
+```
+
+重启后 `http://<HOST>:18010/mcp` 这一个端点上就同时有 `ops_chat`、`crm_chat` 两个工具（各自独立维护会话 `chat_id`，上下文互不干扰；`CHAT_API_KEY` 单智能体配置仍可与之并存）。工具描述里写清楚各智能体擅长什么，调用方 AI 才能选对工具。
+
+<details>
+<summary>备选方案：复制多个 chat 服务（各配独立 Key / 端口）</summary>
 
 ```yaml
   chat-expert:
@@ -136,7 +147,8 @@ POST /chat/api/chat_message/{chat_id}   （同样带这个 Key）
     restart: always
 ```
 
-再在 `.env` 里加一行 `CHAT_EXPERT_API_KEY=...`，`docker compose up -d` 即可。
+适合想让不同智能体暴露在不同 MCP 端点（做权限隔离 / 分组）的场景；一般场景用 `CHAT_AGENTS` 即可。
+</details>
 
 ### 第 4 步：构建并启动
 
@@ -192,9 +204,10 @@ curl -X POST http://127.0.0.1:18010/mcp \
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
 | `CHAT_PORT` | ❌ | `18010` | 宿主机端口（容器内固定 8000） |
-| `CHAT_API_KEY` | ✅ | 无 | 应用 API Key。v2.10+ 多为 `agent-` 前缀，旧版为 `application-`，以页面实际复制为准 |
+| `CHAT_API_KEY` | ✅（与 `CHAT_AGENTS` 二选一） | 无 | 单智能体：应用 API Key。v2.10+ 多为 `agent-` 前缀，旧版为 `application-`，以页面实际复制为准 |
+| `CHAT_AGENTS` | ❌ | 空 | **多智能体**：`工具名:应用APIKey[:描述]`，多个用 `\|` 分隔；一个进程注册多个对话工具，各自独立会话 |
 | `CHAT_SERVER_NAME` | ❌ | `MaxKB 智能体对话 MCP 服务器` | 展示给客户端的服务器名 |
-| `CHAT_TOOL_NAME` | ❌ | `maxkb_chat` | 对外暴露的工具名 |
+| `CHAT_TOOL_NAME` | ❌ | `maxkb_chat` | 单智能体方式下的工具名 |
 | `CHAT_TOOL_DESCRIPTION` | ❌ | 内置描述 | 工具描述，决定调用方 AI 何时使用它 |
 | `CHAT_TIMEOUT` | ❌ | `180` | 调用 MaxKB 对话接口超时（秒） |
 | `MAXKB_CHAT_PREFIX` | ❌ | `/chat` | 聊天 API 前缀，一般无需修改 |
@@ -263,7 +276,7 @@ curl -X POST http://127.0.0.1:18010/mcp \
 Authorization: Bearer <MCP_AUTH_TOKEN 的值>
 ```
 
-添加完成后，在客户端执行「列出工具 / refresh」，应能看到 1 + 7 个工具。
+添加完成后，在客户端执行「列出工具 / refresh」，应能看到对话工具（单智能体 1 个；配置 `CHAT_AGENTS` 后为 1 + N 个）+ 知识库 7 个工具。
 
 ### 5.2 工具清单与参数
 

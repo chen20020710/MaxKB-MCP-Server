@@ -20,10 +20,20 @@ MaxKB 智能体对话 MCP 服务器（对接 MaxKB v2.x）
                     注意: 请勿填应用专属地址 http://host/chat/api/<应用ID>。
                     服务会自动剥离 /chat|/admin 及其后的路径做归一化,
                     但建议在 compose 中直接填根地址以免歧义。
-  API_KEY           应用 API Key, 如 agent-xxxxxxxx / application-xxx   (必填)
+  API_KEY           【单智能体方式】应用 API Key, 如 agent-xxxxxxxx      (与 CHAT_AGENTS 二选一)
+  CHAT_AGENTS       【多智能体方式】一个进程注册多个对话工具, 格式:
+                      工具名:应用APIKey[:描述]|工具名2:应用APIKey2[:描述2]
+                    - 条目间用 | 分隔; 描述可省略(用默认文案), 描述内可含冒号(只在
+                      前两个字段切分); 描述内不要用 | 字符。
+                    - 工具名建议用 ASCII(字母/数字/下划线/连字符), 便于客户端分类,
+                      且不能与 API_KEY 方式生成的 TOOL_NAME 重复。
+                    - 每个智能体各自维护会话 chat_id, 互不串上下文。
+                    示例:
+                      CHAT_AGENTS=ops_chat:agent-aaa:运维专家, 回答VMware/机房问题|crm_chat:agent-bbb
+                    两个变量可同时配置(API_KEY 生成 TOOL_NAME 工具, CHAT_AGENTS 追加其余工具)。
   SERVER_NAME       MCP 服务器名称(展示用)
-  TOOL_NAME         对外暴露的工具名, 默认 maxkb_chat
-  TOOL_DESCRIPTION  工具描述(会展示给调用方 AI)
+  TOOL_NAME         单智能体方式下的工具名, 默认 maxkb_chat
+  TOOL_DESCRIPTION  单智能体方式下的工具描述(会展示给调用方 AI)
   MAXKB_CHAT_PREFIX MaxKB 聊天 API 前缀, 默认 /chat
   MAXKB_TIMEOUT     调用 MaxKB 的超时时间(秒), 默认 180
   HOST / PORT       监听地址与端口, 默认 0.0.0.0:8000
@@ -35,6 +45,7 @@ MaxKB 智能体对话 MCP 服务器（对接 MaxKB v2.x）
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -96,11 +107,62 @@ TOOL_DESCRIPTION = _env(
     "TOOL_DESCRIPTION",
     "发送消息给 MaxKB 智能体并获取回答",
 )
+CHAT_AGENTS_RAW = _env("CHAT_AGENTS", "")
 MAXKB_TIMEOUT = float(_env("MAXKB_TIMEOUT", "180"))
 HOST = _env("HOST", "0.0.0.0")
 PORT = int(_env("PORT", "8000"))
 MCP_AUTH_TOKEN = _env("MCP_AUTH_TOKEN")
 ALLOWED_HOSTS_RAW = _env("MCP_ALLOWED_HOSTS", "*")
+
+DEFAULT_AGENT_DESC = "发送消息给 MaxKB 智能体并获取回答"
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+
+
+class AgentConfig:
+    """一个智能体 = 一个对话工具: 工具名 + 应用 API Key + 描述。"""
+
+    __slots__ = ("tool_name", "api_key", "description", "chat_id")
+
+    def __init__(self, tool_name: str, api_key: str, description: str):
+        self.tool_name = tool_name
+        self.api_key = api_key
+        self.description = description
+        self.chat_id: str | None = None  # 每个智能体独立维护会话上下文
+
+
+def _parse_agents(raw: str) -> list[AgentConfig]:
+    """解析 CHAT_AGENTS=名:Key[:描述]|名2:Key2 格式; 配置错误时启动即报错(fail-fast)。"""
+    agents: list[AgentConfig] = []
+    for item in (raw or "").split("|"):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split(":", 2)
+        if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+            raise RuntimeError(
+                f"CHAT_AGENTS 条目格式错误(应为 工具名:应用APIKey[:描述]): {item!r}"
+            )
+        name, key = parts[0].strip(), parts[1].strip()
+        desc = parts[2].strip() if len(parts) > 2 and parts[2].strip() else DEFAULT_AGENT_DESC
+        if not _TOOL_NAME_RE.match(name):
+            raise RuntimeError(
+                f"CHAT_AGENTS 工具名只允许字母/数字/下划线/连字符/点(建议 ASCII): {name!r}"
+            )
+        agents.append(AgentConfig(name, key, desc))
+    return agents
+
+
+AGENT_LIST: list[AgentConfig] = []
+_seen_names: set[str] = set()
+if API_KEY:
+    ag = AgentConfig(TOOL_NAME, API_KEY, TOOL_DESCRIPTION)
+    AGENT_LIST.append(ag)
+    _seen_names.add(TOOL_NAME)
+for ag in _parse_agents(CHAT_AGENTS_RAW):
+    if ag.tool_name in _seen_names:
+        raise RuntimeError(f"工具名重复: {ag.tool_name} (检查 API_KEY/TOOL_NAME 与 CHAT_AGENTS 是否冲突)")
+    _seen_names.add(ag.tool_name)
+    AGENT_LIST.append(ag)
 
 
 # ----------------------------------------------------------------------------
@@ -116,8 +178,8 @@ def get_client() -> httpx.AsyncClient:
     return _client
 
 
-def auth_headers() -> dict:
-    return {"Authorization": f"Bearer {API_KEY}"}
+def auth_headers(api_key: str) -> dict:
+    return {"Authorization": f"Bearer {api_key}"}
 
 
 def parse_payload(resp: httpx.Response) -> dict:
@@ -189,13 +251,12 @@ def extract_answer(payload: Any) -> str:
 
 
 # ----------------------------------------------------------------------------
-# 会话管理: 复用 chat_id 实现多轮上下文
+# 会话管理: 每个智能体(agent)独立维护 chat_id, 互不串上下文
 # ----------------------------------------------------------------------------
-_state: dict = {"chat_id": None}
-
-
-async def _open_chat() -> str:
-    resp = await get_client().get(f"{BASE_URL}{CHAT_PREFIX}/api/open", headers=auth_headers())
+async def _open_chat(api_key: str) -> str:
+    resp = await get_client().get(
+        f"{BASE_URL}{CHAT_PREFIX}/api/open", headers=auth_headers(api_key)
+    )
     payload = parse_payload(resp)
     data = payload.get("data")
     if isinstance(data, str) and data:
@@ -207,52 +268,61 @@ async def _open_chat() -> str:
     raise ToolError("打开会话失败(未返回 chat_id): " + json.dumps(payload, ensure_ascii=False)[:300])
 
 
-async def _send_message(chat_id: str, message: str) -> dict:
+async def _send_message(api_key: str, chat_id: str, message: str) -> dict:
     resp = await get_client().post(
         f"{BASE_URL}{CHAT_PREFIX}/api/chat_message/{chat_id}",
-        headers={**auth_headers(), "Content-Type": "application/json"},
+        headers={**auth_headers(api_key), "Content-Type": "application/json"},
         json={"message": message, "stream": False, "re_chat": False},
     )
     return parse_payload(resp)
 
 
-async def maxkb_chat(message: str, new_chat: bool = False, chat_id: str = "") -> str:
-    """发送消息给 MaxKB 智能体并获取回答。"""
-    if not BASE_URL:
-        raise ToolError("未配置 BASE_URL，请在环境变量中设置 MaxKB 服务地址")
-    if not API_KEY:
-        raise ToolError("未配置 API_KEY，请在环境变量中设置应用 API Key (application-xxx)")
+def _make_chat_tool(agent: AgentConfig):
+    """为一个智能体生成专属对话工具函数(闭包持有 agent 以隔离会话状态)。"""
 
-    try:
-        cid = (chat_id or "").strip() or None
-        if cid is None:
-            if new_chat or not _state["chat_id"]:
-                _state["chat_id"] = await _open_chat()
-            cid = _state["chat_id"]
-
+    async def chat(message: str, new_chat: bool = False, chat_id: str = "") -> str:
+        """发送消息给 MaxKB 智能体并获取回答。"""
+        if not BASE_URL:
+            raise ToolError("未配置 BASE_URL，请在环境变量中设置 MaxKB 服务地址")
+        if not agent.api_key:
+            raise ToolError(f"智能体 {agent.tool_name} 未配置应用 API Key")
         try:
-            payload = await _send_message(cid, message)
-        except ToolError as e:
-            msg = str(e)
-            # 会话不存在/已过期时自动重开一个会话并重试一次
-            if "会话" in msg or "conversation" in msg.lower():
-                _state["chat_id"] = await _open_chat()
-                cid = _state["chat_id"]
-                payload = await _send_message(cid, message)
-            else:
-                raise
+            cid = (chat_id or "").strip() or None
+            if cid is None:
+                if new_chat or not agent.chat_id:
+                    agent.chat_id = await _open_chat(agent.api_key)
+                cid = agent.chat_id
 
-        answer = extract_answer(payload)
-        _state["chat_id"] = cid
-        return f"{answer}\n\n[chat_id: {cid}]"
-    except httpx.TimeoutException:
-        raise ToolError(f"MaxKB 请求超时({MAXKB_TIMEOUT}s)，可在环境变量 MAXKB_TIMEOUT 中调大")
-    except httpx.HTTPError as e:
-        raise ToolError(f"无法连接 MaxKB ({BASE_URL}): {e}")
-    except ToolError:
-        raise
-    except Exception as e:
-        raise ToolError(f"调用 MaxKB 对话接口出错: {type(e).__name__}: {e}")
+            try:
+                payload = await _send_message(agent.api_key, cid, message)
+            except ToolError as e:
+                msg = str(e)
+                # 会话不存在/已过期时自动重开一个会话并重试一次
+                if "会话" in msg or "conversation" in msg.lower():
+                    agent.chat_id = await _open_chat(agent.api_key)
+                    cid = agent.chat_id
+                    payload = await _send_message(agent.api_key, cid, message)
+                else:
+                    raise
+
+            answer = extract_answer(payload)
+            agent.chat_id = cid
+            return f"{answer}\n\n[chat_id: {cid}]"
+        except httpx.TimeoutException:
+            raise ToolError(f"MaxKB 请求超时({MAXKB_TIMEOUT}s)，可在环境变量 MAXKB_TIMEOUT 中调大")
+        except httpx.HTTPError as e:
+            raise ToolError(f"无法连接 MaxKB ({BASE_URL}): {e}")
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(f"调用 MaxKB 对话接口出错: {type(e).__name__}: {e}")
+
+    chat.__name__ = agent.tool_name
+    return chat
+
+
+# 兼容旧接口: 单智能体模式下仍提供 maxkb_chat 名字供测试/调用
+maxkb_chat = _make_chat_tool(AGENT_LIST[0]) if AGENT_LIST else None
 
 
 # ----------------------------------------------------------------------------
@@ -260,13 +330,17 @@ async def maxkb_chat(message: str, new_chat: bool = False, chat_id: str = "") ->
 # ----------------------------------------------------------------------------
 mcp = MCPServer(SERVER_NAME)
 
-_FULL_DESCRIPTION = (
-    TOOL_DESCRIPTION
-    + "\n\n参数说明: message=要发送的消息内容; new_chat=true 时新开一个对话(默认 false, "
-      "自动延续服务器内保存的最近一次对话上下文); chat_id=传入已有对话 id 以在该对话中继续。"
+_PARAM_HINT = (
+    "\n\n参数说明: message=要发送的消息内容; new_chat=true 时新开一个对话(默认 false, "
+    "自动延续本智能体最近一次对话上下文); chat_id=传入已有对话 id 以在该对话中继续。"
 )
 
-mcp.add_tool(maxkb_chat, name=TOOL_NAME, description=_FULL_DESCRIPTION)
+if not AGENT_LIST:
+    log.warning("未配置任何智能体(API_KEY 与 CHAT_AGENTS 均为空), 对话工具将不可用")
+
+for _agent in AGENT_LIST:
+    _fn = _make_chat_tool(_agent)
+    mcp.add_tool(_fn, name=_agent.tool_name, description=_agent.description + _PARAM_HINT)
 
 
 def _build_security() -> TransportSecuritySettings:
@@ -291,7 +365,8 @@ async def health(request: Request) -> JSONResponse:
         {
             "status": "ok",
             "server": SERVER_NAME,
-            "tool": TOOL_NAME,
+            "tools": [a.tool_name for a in AGENT_LIST],
+            "agent_count": len(AGENT_LIST),
             "transports": {
                 "streamable-http": "/mcp",
                 "sse": "/sse (POST /messages/)",
@@ -299,8 +374,11 @@ async def health(request: Request) -> JSONResponse:
             "maxkb_base_url": BASE_URL or "(未配置)",
             "maxkb_base_url_raw": BASE_URL_RAW or "(未配置)",
             "maxkb_open_url": f"{BASE_URL}{CHAT_PREFIX}/api/open" if BASE_URL else "(未配置)",
-            "api_key_set": bool(API_KEY),
-            "current_chat_id": _state["chat_id"],
+            # 只回显是否已配置与当前会话 id, 不回显任何密钥
+            "agents": [
+                {"tool": a.tool_name, "api_key_set": bool(a.api_key), "chat_id": a.chat_id}
+                for a in AGENT_LIST
+            ],
         }
     )
 
@@ -366,10 +444,12 @@ def main() -> None:
     log.info("  对外协议:  MCP(Streamable HTTP) http://%s:%s/mcp", HOST, PORT)
     log.info("             SSE                   http://%s:%s/sse", HOST, PORT)
     log.info("  健康检查:  http://%s:%s/health", HOST, PORT)
-    log.info("  MaxKB:     %s (API_KEY %s)", BASE_URL or "未配置", "已配置" if API_KEY else "未配置!!")
-    log.info("  工具:      %s", TOOL_NAME)
-    if not BASE_URL or not API_KEY:
-        log.error("  !! BASE_URL / API_KEY 未配置, 工具调用将报错, 请检查环境变量")
+    log.info("  MaxKB:     %s", BASE_URL or "未配置")
+    log.info("  智能体:    %d 个 -> %s", len(AGENT_LIST), " / ".join(a.tool_name for a in AGENT_LIST) or "(未配置!!)")
+    if not BASE_URL:
+        log.error("  !! BASE_URL 未配置, 工具调用将报错, 请检查环境变量")
+    if not AGENT_LIST:
+        log.error("  !! API_KEY 与 CHAT_AGENTS 均未配置, 没有可用对话工具, 请检查环境变量")
     log.info("=" * 60)
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
