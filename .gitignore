@@ -1,0 +1,23 @@
+# ===== 真实配置: 含密码 / API Key, 严禁提交 =====
+.env
+.env.*
+!.env.example
+*.env
+!.env.example
+
+# ===== 运行时产生的数据 / 日志 =====
+data/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ===== 编辑器 / 操作系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
