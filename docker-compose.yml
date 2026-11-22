@@ -54,7 +54,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # 服务 2: 知识库管理 MCP 服务器
-  #   工具: list_agents / list_knowledge_bases / list_documents /
+  #   工具: list_knowledge_bases / list_documents /
   #         add_segment / upload_document / search_knowledge
   #   端点: /mcp (Streamable HTTP) | /sse (SSE) | /health
   # ---------------------------------------------------------------------------

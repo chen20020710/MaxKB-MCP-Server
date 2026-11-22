@@ -4,7 +4,7 @@
 MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
 
 功能:
-  1. 查询智能体(应用)列表 / 知识库列表
+  1. 查询知识库列表
   2. 上传文件到知识库, 两种方式:
      a. add_segment      —— 直接创建分段(传入文本内容), 可新建文档或追加到已有文档
      b. upload_document  —— 上传整个文件:
@@ -23,7 +23,6 @@ MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
 对接的 MaxKB 管理端接口(前缀 {BASE_URL}/admin/api, 认证 Authorization: Bearer <token>):
   - POST /user/login                                    账号密码登录获取 token
   - GET  /user/profile                                  获取用户信息(含 workspace_list)
-  - GET  /workspace/{wid}/application/{page}/{size}     智能体列表(分页)
   - GET  /workspace/{wid}/knowledge/{page}/{size}       知识库列表(分页)
   - GET  /workspace/{wid}/knowledge/{kid}               知识库详情
   - POST /workspace/{wid}/knowledge/{kid}/document                      创建文档(可内嵌分段)
@@ -330,35 +329,6 @@ def _fmt_row(it: dict, keys: list[str]) -> str:
 # ----------------------------------------------------------------------------
 # 工具实现
 # ----------------------------------------------------------------------------
-async def list_agents(name: str = "", current_page: int = 1, page_size: int = 20) -> str:
-    """查询 MaxKB 智能体(应用)列表。
-
-    参数 name 可按名称模糊过滤; current_page/page_size 分页。
-    返回每个智能体的 id、名称、类型、创建时间等信息。
-    """
-    ws = await get_workspace_id()
-    params = {"name": name} if name else None
-    try:
-        payload = await maxkb_request(
-            "GET", f"/workspace/{ws}/application/{current_page}/{page_size}", params=params
-        )
-        items, total = page_items(payload)
-    except ToolError:
-        # 兼容不支持分页接口的版本, 回退到非分页列表
-        payload = await maxkb_request("GET", f"/workspace/{ws}/application", params=params)
-        items, total = page_items(payload)
-
-    lines = [f"智能体列表 (工作空间 {ws}, 共 {total} 个, 第 {current_page} 页):"]
-    if not items:
-        lines.append("  (空)")
-    for it in items:
-        if isinstance(it, dict):
-            lines.append("- " + _fmt_row(it, ["id", "name", "type", "create_time", "desc"]))
-        else:
-            lines.append(f"- {it}")
-    return "\n".join(lines)
-
-
 async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size: int = 20) -> str:
     """查询 MaxKB 知识库列表。
 
@@ -1018,7 +988,6 @@ async def get_segment_context(
 # ----------------------------------------------------------------------------
 mcp = MCPServer(SERVER_NAME)
 
-mcp.add_tool(list_agents, name="list_agents")
 mcp.add_tool(list_knowledge_bases, name="list_knowledge_bases")
 mcp.add_tool(list_documents, name="list_documents")
 mcp.add_tool(add_segment, name="add_segment")
@@ -1045,7 +1014,6 @@ async def health(request: Request) -> JSONResponse:
             "status": "ok",
             "server": SERVER_NAME,
             "tools": [
-                "list_agents",
                 "list_knowledge_bases",
                 "list_documents",
                 "add_segment",
@@ -1130,7 +1098,7 @@ def main() -> None:
     log.info("  健康检查:  http://%s:%s/health", HOST, PORT)
     log.info("  MaxKB:     %s", BASE_URL or "未配置")
     log.info("  凭据方式:  %s", "API Key" if MAXKB_API_KEY else ("账号密码" if MAXKB_USERNAME else "未配置!!"))
-    log.info("  工具:      list_agents / list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge / get_segment_context")
+    log.info("  工具:      list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge / get_segment_context")
     if not BASE_URL or not (MAXKB_API_KEY or MAXKB_USERNAME):
         log.error("  !! BASE_URL 或凭据未配置, 工具调用将报错, 请检查环境变量")
     log.info("=" * 60)

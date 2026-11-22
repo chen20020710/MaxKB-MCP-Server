@@ -11,7 +11,7 @@
 | 服务 | 目录 | 默认端口 | 提供的工具 | 主要用途 |
 |---|---|---|---|---|
 | **智能体对话** | `maxkb-chat-mcp/` | `18010` | `maxkb_chat` | 与指定 MaxKB 应用（智能体）对话，支持多轮上下文 |
-| **知识库管理** | `maxkb-knowledge-mcp/` | `18011` | `list_agents`、`list_knowledge_bases`、`list_documents`、`add_segment`、`upload_document`、`search_knowledge`、`get_segment_context` | 查询列表、上传文档、创建分段、直接检索知识切片、按命中片段扩展前后上下文或读取全文 |
+| **知识库管理** | `maxkb-knowledge-mcp/` | `18011` | `list_knowledge_bases`、`list_documents`、`add_segment`、`upload_document`、`search_knowledge`、`get_segment_context` | 查询列表、上传文档、创建分段、直接检索知识切片、按命中片段扩展前后上下文或读取全文 |
 
 两个服务相互独立，可以一起启动，也可以只启动其中一个。
 
@@ -276,7 +276,7 @@ curl -X POST http://127.0.0.1:18010/mcp \
 Authorization: Bearer <MCP_AUTH_TOKEN 的值>
 ```
 
-添加完成后，在客户端执行「列出工具 / refresh」，应能看到对话工具（单智能体 1 个；配置 `CHAT_AGENTS` 后为 1 + N 个）+ 知识库 7 个工具。
+添加完成后，在客户端执行「列出工具 / refresh」，应能看到对话工具（单智能体 1 个；配置 `CHAT_AGENTS` 后为 1 + N 个）+ 知识库 6 个工具。
 
 ### 5.2 工具清单与参数
 
@@ -290,7 +290,6 @@ Authorization: Bearer <MCP_AUTH_TOKEN 的值>
 
 | 工具 | 关键参数 | 说明 |
 |---|---|---|
-| `list_agents` | `name`、`current_page`、`page_size` | 查询智能体（应用）列表，可按名称模糊过滤 |
 | `list_knowledge_bases` | `name`、`current_page`、`page_size` | 查询知识库列表，返回的 `id` 可用于其他工具 |
 | `list_documents` | `knowledge_base_id`、`name`、`current_page`、`page_size` | 查询知识库下文档列表，返回的文档 `id` 可用于 `add_segment` |
 | `add_segment` | `content`（必填）、`title`、`document_name`、`document_id`、`knowledge_base_id`、`problems` | **方式一：创建分段**。直接传文本内容新建一条分段；指定 `document_id` 时追加到已有文档；`problems` 为同义问题列表，可提高检索命中率 |
