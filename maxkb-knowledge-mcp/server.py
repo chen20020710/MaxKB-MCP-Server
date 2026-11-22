@@ -1,61 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MaxKB 知识库管理 MCP 服务器（对接 MaxKB v2.x）
+MaxKB knowledge base management MCP server (MaxKB v2.x).
 
-功能:
-  1. 查询知识库列表
-  2. 上传文件到知识库, 两种方式:
-     a. add_segment      —— 直接创建分段(传入文本内容), 可新建文档或追加到已有文档
-     b. upload_document  —— 上传整个文件:
-        - 普通知识库: 调用 document/split 自动分段 + batch_create 创建文档
-        - 工作流知识库(type=4): 先上传源文件, 再通过 upload_document 交给
-          知识库工作流做智能分段(异步处理)
-  3. search_knowledge   —— 直接检索知识库(命中测试), 获取知识切片
-  4. get_segment_context —— 读取命中片段的前后相邻片段(上下文扩展)或整篇文档全文
-  5. list_documents     —— 查询知识库下的文档列表
+Features:
+  1. list_knowledge_bases  - list knowledge bases
+  2. upload documents, two ways:
+     a. add_segment      - create a segment from raw text (new document or append)
+     b. upload_document  - upload a whole file:
+        - regular knowledge base: document/split + batch_create
+        - workflow knowledge base (type=4): upload source file, then hand it to
+          the knowledge workflow for smart splitting (async)
+  3. search_knowledge    - direct retrieval (hit test), returns matched segments
+  4. get_segment_context - read segments around a hit (context expansion) or the
+                           full document text
+  5. list_documents      - list documents of a knowledge base
 
-传输协议(同一进程):
+Transports (same process):
   * MCP Streamable HTTP:  http://<host>:<port>/mcp
-  * MCP SSE:               http://<host>:<port>/sse  (消息回传 /messages/)
-  * 健康检查:              http://<host>:<port>/health
+  * MCP SSE:               http://<host>:<port>/sse  (messages via /messages/)
+  * Health check:          http://<host>:<port>/health
 
-对接的 MaxKB 管理端接口(前缀 {BASE_URL}/admin/api, 认证 Authorization: Bearer <token>):
-  - POST /user/login                                    账号密码登录获取 token
-  - GET  /user/profile                                  获取用户信息(含 workspace_list)
-  - GET  /workspace/{wid}/knowledge/{page}/{size}       知识库列表(分页)
-  - GET  /workspace/{wid}/knowledge/{kid}               知识库详情
-  - POST /workspace/{wid}/knowledge/{kid}/document                      创建文档(可内嵌分段)
-  - POST /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph      向已有文档添加分段
-  - POST /workspace/{wid}/knowledge/{kid}/document/split                文件分段(返回分段结果)
-  - POST /workspace/{wid}/knowledge/{kid}/document/batch_create         批量创建文档
-  - POST /workspace/{wid}/knowledge/{kid}/upload_document               工作流方式上传文档
-  - POST /workspace/{wid}/knowledge/{kid}/hit_test                      命中测试/检索
-  - GET  /workspace/{wid}/knowledge/{kid}/document/{page}/{size}       文档列表(分页)
-  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph      文档分段列表(不分页, 含完整正文)
-  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph/{p}/{s} 文档分段列表(分页)
-  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/download_source_file 文档原始文件(仅手动上传)
-  - POST /oss/file                                      上传源文件(工作流方式需要)
+MaxKB admin endpoints used (prefix {BASE_URL}/admin/api, Authorization: Bearer <token>):
+  - POST /user/login                                    login with username/password
+  - GET  /user/profile                                  user info (workspace_list)
+  - GET  /workspace/{wid}/knowledge/{page}/{size}       knowledge base list (paged)
+  - GET  /workspace/{wid}/knowledge/{kid}               knowledge base details
+  - POST /workspace/{wid}/knowledge/{kid}/document                      create document (inline segments)
+  - POST /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph      append segment to a document
+  - POST /workspace/{wid}/knowledge/{kid}/document/split                split a file (preview)
+  - POST /workspace/{wid}/knowledge/{kid}/document/batch_create         batch create documents
+  - POST /workspace/{wid}/knowledge/{kid}/upload_document               workflow upload
+  - POST /workspace/{wid}/knowledge/{kid}/hit_test                      retrieval / hit test
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{page}/{size}       document list (paged)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph      all segments (unpaged, full text)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/paragraph/{p}/{s} segments (paged)
+  - GET  /workspace/{wid}/knowledge/{kid}/document/{did}/download_source_file original file (manual uploads only)
+  - POST /oss/file                                      upload source file (workflow mode)
 
-环境变量:
-  BASE_URL             MaxKB 服务地址, 如 http://<MAXKB_HOST>:8080                (必填)
-  MAXKB_API_KEY        用户级 API Key(推荐, MaxKB 页面右上角"API Key 管理"创建) (二选一)
-  MAXKB_USERNAME       登录用户名                                            (二选一)
-  MAXKB_PASSWORD       登录密码
-  MAXKB_WORKSPACE_ID   工作空间 id, 默认自动从用户 profile 获取(社区版为 default)
-  MAXKB_KNOWLEDGE_ID   默认知识库 id, 工具未显式指定时使用
-  MAXKB_ADMIN_PREFIX   管理端 API 前缀, 默认 /admin
-  SERVER_NAME          MCP 服务器名称
-  MAXKB_TIMEOUT        调用超时(秒), 默认 120
-  MAXKB_TOP_NUMBER     检索默认返回条数, 默认 5
-  MAXKB_SIMILARITY     检索默认相似度阈值, 默认 0.6
-  MAXKB_SEARCH_MODE    检索默认模式 embedding|keywords|blend, 默认 blend
-                    (工具入参支持中文/别名自动归一化, 非法值回退默认)
-  MAXKB_CONTEXT_NEIGHBORS get_segment_context 默认前后各扩展分段数, 默认 1
-  MAXKB_CONTEXT_MAX_CHARS get_segment_context 默认返回字符上限, 默认 6000
-  HOST / PORT          监听地址与端口, 默认 0.0.0.0:8000
-  MCP_AUTH_TOKEN       可选, 设置后调用 MCP 端点需要 Bearer 令牌
-  MCP_ALLOWED_HOSTS    Host 白名单, 默认 * 不校验
+Environment variables:
+  BASE_URL             MaxKB service address, e.g. http://<MAXKB_HOST>:8080   (required)
+  MAXKB_API_KEY        user-level API key (recommended)                       (either)
+  MAXKB_USERNAME       login username                                         (either)
+  MAXKB_PASSWORD       login password
+  MAXKB_WORKSPACE_ID   workspace id, auto-detected from profile when empty
+  MAXKB_KNOWLEDGE_ID   default knowledge base id used when a tool omits it
+  MAXKB_ADMIN_PREFIX   admin API prefix, default /admin
+  SERVER_NAME          MCP server display name
+  MAXKB_TIMEOUT        request timeout (seconds), default 120
+  MAXKB_TOP_NUMBER     default retrieval result count, default 5
+  MAXKB_SIMILARITY     default similarity threshold, default 0.6
+  MAXKB_SEARCH_MODE    default retrieval mode embedding|keywords|blend, default blend
+                       (tool arguments accept aliases and are normalized)
+  MAXKB_CONTEXT_NEIGHBORS get_segment_context default segments per side, default 1
+  MAXKB_CONTEXT_MAX_CHARS get_segment_context default character cap, default 6000
+  HOST / PORT          bind address and port, default 0.0.0.0:8000
+  MCP_AUTH_TOKEN       optional; when set, MCP endpoints require a Bearer token
+  MCP_ALLOWED_HOSTS    Host header allow-list, default * (no check)
 """
 import base64
 import json
@@ -82,7 +83,7 @@ log = logging.getLogger("maxkb-knowledge-mcp")
 
 
 # ----------------------------------------------------------------------------
-# 配置
+# Configuration
 # ----------------------------------------------------------------------------
 def _env(key: str, default: str | None = None) -> str | None:
     v = os.getenv(key)
@@ -90,7 +91,7 @@ def _env(key: str, default: str | None = None) -> str | None:
 
 
 def _normalize_base_url(raw: str) -> str:
-    """把 BASE_URL 归一化成 MaxKB 服务根地址(剥离误填的 /chat|/admin 应用专属路径)。"""
+    """Normalize BASE_URL to the MaxKB service root (strip /chat|/admin app paths)."""
     raw = (raw or "").strip()
     if not raw:
         return ""
@@ -115,17 +116,17 @@ MAXKB_PASSWORD = _env("MAXKB_PASSWORD", "")
 MAXKB_WORKSPACE_ID = _env("MAXKB_WORKSPACE_ID", "")
 MAXKB_KNOWLEDGE_ID = _env("MAXKB_KNOWLEDGE_ID", "")
 ADMIN_PREFIX = (_env("MAXKB_ADMIN_PREFIX", "/admin")).rstrip("/")
-SERVER_NAME = _env("SERVER_NAME", "MaxKB 知识库管理 MCP 服务器")
+SERVER_NAME = _env("SERVER_NAME", "MaxKB Knowledge Base MCP Server")
 MAXKB_TIMEOUT = float(_env("MAXKB_TIMEOUT", "120"))
 DEFAULT_TOP_NUMBER = int(_env("MAXKB_TOP_NUMBER", "5"))
 DEFAULT_SIMILARITY = float(_env("MAXKB_SIMILARITY", "0.6"))
 DEFAULT_SEARCH_MODE = _env("MAXKB_SEARCH_MODE", "blend")
-# get_segment_context 默认值: 前后各扩展几段、总量字符上限
+# get_segment_context defaults: segments per side and total character cap
 DEFAULT_CONTEXT_NEIGHBORS = int(_env("MAXKB_CONTEXT_NEIGHBORS", "1"))
 DEFAULT_CONTEXT_MAX_CHARS = int(_env("MAXKB_CONTEXT_MAX_CHARS", "6000"))
 
-# MaxKB v2.x HitTest 只接受 embedding|keywords|blend (报错文案的中文只是 i18n 翻译)。
-# LLM 常会传中文/别名, 这里统一归一化, 非法值回退默认, 绝不再透传给 MaxKB 触发 500。
+# MaxKB v2.x HitTest only accepts embedding|keywords|blend. The Chinese keys
+# below are INPUT normalization (LLMs often pass Chinese/aliases), not output.
 _SEARCH_MODE_MAP = {
     "embedding": "embedding", "embed": "embedding", "vector": "embedding",
     "semantic": "embedding", "语义": "embedding", "向量": "embedding", "嵌入": "embedding",
@@ -150,7 +151,7 @@ ALLOWED_HOSTS_RAW = _env("MCP_ALLOWED_HOSTS", "*")
 
 
 # ----------------------------------------------------------------------------
-# 认证与 HTTP 客户端
+# Auth & HTTP client
 # ----------------------------------------------------------------------------
 _client: httpx.AsyncClient | None = None
 
@@ -171,7 +172,7 @@ _auth = _AuthState()
 
 async def _login() -> None:
     if not (MAXKB_USERNAME and MAXKB_PASSWORD):
-        raise ToolError("未配置凭据: 请设置 MAXKB_API_KEY, 或设置 MAXKB_USERNAME/MAXKB_PASSWORD")
+        raise ToolError("No credentials configured: set MAXKB_API_KEY, or MAXKB_USERNAME/MAXKB_PASSWORD")
     resp = await get_client().post(
         f"{BASE_URL}{ADMIN_PREFIX}/api/user/login",
         headers={"Content-Type": "application/json"},
@@ -181,12 +182,12 @@ async def _login() -> None:
     data = payload.get("data")
     token = data.get("token") if isinstance(data, dict) else data
     if not token:
-        raise ToolError("登录成功但未返回 token: " + json.dumps(payload, ensure_ascii=False)[:300])
+        raise ToolError("Login succeeded but no token returned: " + json.dumps(payload, ensure_ascii=False)[:300])
     _auth.jwt = str(token)
 
 
 async def _auth_headers(force_new: bool = False) -> dict:
-    # 优先使用 API Key; 否则账号密码登录获取 JWT
+    # Prefer the API key; otherwise log in with username/password for a JWT
     if MAXKB_API_KEY and not force_new:
         return {"Authorization": f"Bearer {MAXKB_API_KEY}"}
     if not _auth.jwt or force_new:
@@ -195,21 +196,21 @@ async def _auth_headers(force_new: bool = False) -> dict:
 
 
 def parse_payload(resp: httpx.Response) -> dict:
-    """解析 MaxKB 响应。HTTP 200 时业务码在 body.code 中, 200 才算成功。"""
+    """Parse a MaxKB response. Business code lives in body.code under HTTP 200."""
     try:
         payload = resp.json()
     except Exception:
-        raise ToolError(f"MaxKB 返回了非 JSON 内容 (HTTP {resp.status_code}): {resp.text[:300]}")
+        raise ToolError(f"MaxKB returned non-JSON content (HTTP {resp.status_code}): {resp.text[:300]}")
     if not isinstance(payload, dict):
         return {"data": payload}
     if resp.status_code == 401 or payload.get("code") in (1002, 1003):
         raise ToolError(
-            f"MaxKB 认证失败 ({payload.get('code', resp.status_code)}): "
-            f"{payload.get('message', '请检查凭据是否正确/是否过期')}"
+            f"MaxKB authentication failed ({payload.get('code', resp.status_code)}): "
+            f"{payload.get('message', 'check whether the credentials are correct or expired')}"
         )
     code = payload.get("code")
     if code is not None and code != 200:
-        raise ToolError(f"MaxKB 调用失败 [{code}]: {payload.get('message', '')} [HTTP {resp.status_code}]")
+        raise ToolError(f"MaxKB call failed [{code}]: {payload.get('message', '')} [HTTP {resp.status_code}]")
     return payload
 
 
@@ -225,7 +226,7 @@ async def maxkb_request(
     content_type: str | None = None,
     retried: bool = False,
 ) -> dict:
-    """调用 MaxKB 管理端接口; 遇到 401 时刷新凭据重试一次。"""
+    """Call a MaxKB admin endpoint; refresh credentials and retry once on 401."""
     try:
         headers = await _auth_headers()
         if json_body is not None:
@@ -243,13 +244,13 @@ async def maxkb_request(
             content=content,
         )
     except httpx.TimeoutException:
-        raise ToolError(f"MaxKB 请求超时({MAXKB_TIMEOUT}s): {method} {path}")
+        raise ToolError(f"MaxKB request timed out ({MAXKB_TIMEOUT}s): {method} {path}")
     except httpx.HTTPError as e:
-        raise ToolError(f"无法连接 MaxKB ({BASE_URL}): {e}")
+        raise ToolError(f"Cannot connect to MaxKB ({BASE_URL}): {e}")
     except ToolError:
         raise
     except Exception as e:
-        raise ToolError(f"调用 MaxKB 接口出错 ({method} {path}): {type(e).__name__}: {e}")
+        raise ToolError(f"Error calling MaxKB ({method} {path}): {type(e).__name__}: {e}")
     if resp.status_code == 401 and not retried:
         return await maxkb_request(
             method, path, params=params, json_body=json_body, files=files, data=data,
@@ -259,7 +260,7 @@ async def maxkb_request(
 
 
 # ----------------------------------------------------------------------------
-# 工作空间 / 知识库 解析
+# Workspace / knowledge base resolution
 # ----------------------------------------------------------------------------
 _workspace: dict = {"id": None}
 
@@ -274,7 +275,7 @@ async def get_workspace_id() -> str:
         ws_list = (payload.get("data") or {}).get("workspace_list") or []
         _workspace["id"] = (ws_list[0].get("id") if ws_list else None) or "default"
     except ToolError as e:
-        log.warning("自动获取工作空间失败, 回退为 default: %s", e)
+        log.warning("Auto-detecting workspace failed, falling back to default: %s", e)
         _workspace["id"] = "default"
     return _workspace["id"]
 
@@ -283,8 +284,8 @@ async def resolve_kb(knowledge_base_id: str) -> str:
     kb = (knowledge_base_id or "").strip() or MAXKB_KNOWLEDGE_ID
     if not kb:
         raise ToolError(
-            "未指定知识库: 请传入 knowledge_base_id 参数, "
-            "或在环境变量 MAXKB_KNOWLEDGE_ID 中配置默认知识库 (可先用 list_knowledge_bases 查询)"
+            "No knowledge base specified: pass knowledge_base_id, "
+            "or set MAXKB_KNOWLEDGE_ID (use list_knowledge_bases to find ids)"
         )
     return kb
 
@@ -301,11 +302,11 @@ def page_items(payload: dict) -> tuple[list, Any]:
 
 
 KB_TYPE_NAMES = {
-    0: "通用知识库",
-    1: "Web 知识库",
-    2: "QA 知识库",
-    3: "表格知识库",
-    4: "工作流知识库",
+    0: "general",
+    1: "web",
+    2: "qa",
+    3: "table",
+    4: "workflow",
 }
 
 
@@ -327,13 +328,14 @@ def _fmt_row(it: dict, keys: list[str]) -> str:
 
 
 # ----------------------------------------------------------------------------
-# 工具实现
+# Tools
 # ----------------------------------------------------------------------------
 async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size: int = 20) -> str:
-    """List all knowledge bases. 查询 MaxKB 知识库列表。
+    """List all knowledge bases.
 
-    参数 name 可按名称模糊过滤; current_page/page_size 分页。
-    返回每个知识库的 id、名称、类型、描述等信息, 其中 id 可用于其他工具的 knowledge_base_id 参数。
+    Filter by name (fuzzy) with `name`; paginate with current_page/page_size.
+    Returns id, name, type and description of each knowledge base; the id can be
+    passed to other tools as knowledge_base_id.
     """
     ws = await get_workspace_id()
     params = {"name": name} if name else None
@@ -346,9 +348,9 @@ async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size:
         payload = await maxkb_request("GET", f"/workspace/{ws}/knowledge", params=params)
         items, total = page_items(payload)
 
-    lines = [f"知识库列表 (工作空间 {ws}, 共 {total} 个, 第 {current_page} 页):"]
+    lines = [f"Knowledge bases (workspace {ws}, total {total}, page {current_page}):"]
     if not items:
-        lines.append("  (空)")
+        lines.append("  (empty)")
     for it in items:
         if isinstance(it, dict):
             lines.append("- " + _fmt_row(it, ["id", "name", "type", "desc", "create_time"]))
@@ -360,10 +362,11 @@ async def list_knowledge_bases(name: str = "", current_page: int = 1, page_size:
 async def list_documents(
     knowledge_base_id: str = "", name: str = "", current_page: int = 1, page_size: int = 20
 ) -> str:
-    """List all documents in a knowledge base. 查询指定知识库下的文档列表。
+    """List all documents in a knowledge base.
 
-    参数 knowledge_base_id 不传时使用默认知识库; name 可按文档名过滤。
-    返回文档 id、名称、状态等, 其中文档 id 可用于 add_segment 的 document_id 参数(向已有文档追加分段)。
+    Uses the default knowledge base when knowledge_base_id is omitted; filter by
+    document name with `name`. Returned document ids can be used as document_id
+    in add_segment (append segments to an existing document).
     """
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
@@ -377,9 +380,9 @@ async def list_documents(
         payload = await maxkb_request("GET", f"/workspace/{ws}/knowledge/{kb}/document", params=params)
         items, total = page_items(payload)
 
-    lines = [f"文档列表 (知识库 {kb}, 共 {total} 个, 第 {current_page} 页):"]
+    lines = [f"Documents (knowledge base {kb}, total {total}, page {current_page}):"]
     if not items:
-        lines.append("  (空)")
+        lines.append("  (empty)")
     for it in items:
         if isinstance(it, dict):
             lines.append("- " + _fmt_row(it, ["id", "name", "is_active", "hit_handling_method", "create_time"]))
@@ -400,12 +403,13 @@ async def add_segment(
     knowledge_base_id: str = "",
     problems: list[str] | None = None,
 ) -> str:
-    """Create a custom text segment in a knowledge base. 向知识库添加一条自定义分段(方式一: 直接传入文本内容创建分段)。
+    """Create a custom text segment in a knowledge base.
 
-    content 为分段正文(必填); title 为分段标题;
-    - 指定 document_id 时: 追加到该已有文档;
-    - 未指定 document_id 时: 新建一个文档(名称用 document_name, 缺省用 title 或自动生成)并写入该分段。
-    problems 为可选的同义问题列表(提高命中检索率)。
+    `content` is the segment body (required); `title` the segment title.
+    - with document_id: append the segment to that existing document;
+    - without document_id: create a new document (named by document_name,
+      falling back to title or an auto-generated name) holding this segment.
+    `problems` is an optional list of synonymous questions that improve recall.
     """
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
@@ -430,12 +434,12 @@ async def add_segment(
         elif isinstance(created, dict) and created.get("id"):
             ids = [str(created.get("id"))]
         return (
-            f"分段添加成功: 已追加到文档 {document_id} "
-            f"(知识库 {kb}, 段落id: {', '.join(ids) or '未返回'})"
+            f"Segment added: appended to document {document_id} "
+            f"(knowledge base {kb}, paragraph ids: {', '.join(ids) or 'none returned'})"
         )
     else:
         doc_name = (
-            document_name or title[:40] or f"分段_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            document_name or title[:40] or f"segment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         payload = await maxkb_request(
             "POST",
@@ -449,8 +453,8 @@ async def add_segment(
         elif isinstance(created, list) and created and isinstance(created[0], dict):
             doc_id = created[0].get("id") or created[0].get("document_id")
         return (
-            f"分段添加成功: 已创建新文档「{doc_name}」并写入 1 条分段 "
-            f"(知识库 {kb}, 文档id: {doc_id or '未返回'})"
+            f"Segment added: created document '{doc_name}' with 1 segment "
+            f"(knowledge base {kb}, document id: {doc_id or 'none returned'})"
         )
 
 
@@ -459,7 +463,7 @@ async def _is_workflow_kb(ws: str, kb: str) -> bool:
         payload = await maxkb_request("GET", f"/workspace/{ws}/knowledge/{kb}")
         return (payload.get("data") or {}).get("type") == 4
     except ToolError as e:
-        log.warning("查询知识库类型失败, 按普通知识库处理: %s", e)
+        log.warning("Failed to query knowledge base type, treating as regular: %s", e)
         return False
 
 
@@ -467,7 +471,7 @@ def _read_upload_source(file_path: str, file_name: str, content_base64: str) -> 
     if file_path:
         path = file_path
         if not os.path.isfile(path):
-            raise ToolError(f"文件不存在: {path} (容器内路径, 建议挂载目录后使用, 如 /app/data/xx.pdf)")
+            raise ToolError(f"File not found: {path} (container path; mount a directory first, e.g. /app/data/xx.pdf)")
         with open(path, "rb") as f:
             data = f.read()
         name = file_name or os.path.basename(path)
@@ -476,11 +480,11 @@ def _read_upload_source(file_path: str, file_name: str, content_base64: str) -> 
         try:
             data = base64.b64decode(content_base64)
         except Exception as e:
-            raise ToolError(f"content_base64 解码失败: {e}")
+            raise ToolError(f"content_base64 decode failed: {e}")
         if not (file_name):
-            raise ToolError("使用 content_base64 上传时必须同时提供 file_name")
+            raise ToolError("content_base64 uploads also require file_name")
         return file_name, data
-    raise ToolError("请提供 file_path(服务器本地路径) 或 content_base64+file_name 之一")
+    raise ToolError("Provide either file_path (server-local path) or content_base64+file_name")
 
 
 def _guess_content_type(file_name: str) -> str:
@@ -495,11 +499,12 @@ def _encode_multipart(
     file_data: bytes,
     content_type: str | None = None,
 ) -> tuple[bytes, str]:
-    """手动构造 multipart/form-data 请求体。
+    """Build a multipart/form-data body by hand.
 
-    不使用 httpx 的 files+data 混合编码: 当 data 为 (k,v) 元组列表时 httpx 会产生损坏的请求体,
-    而分段接口的 patterns 字段需要重复键, 只能用元组列表表达。此处同时支持中文文件名
-    (filename + RFC5987 filename* 双写, 与浏览器行为一致)。
+    httpx's files+data mixed encoding produces a broken body when data is a list
+    of (k, v) tuples, while the split endpoint needs repeated `patterns` keys.
+    Non-ASCII file names are supported via filename + RFC5987 filename* (same as
+    browsers).
     """
     boundary = f"----MaxKBMCP{os.urandom(16).hex()}"
     parts: list[bytes] = []
@@ -526,7 +531,7 @@ def _encode_multipart(
 
 
 async def _upload_via_workflow(ws: str, kb: str, name: str, data: bytes) -> str:
-    # 1. 上传源文件到 MaxKB (返回 ./oss/file/<file_id>)
+    # 1. upload the source file to MaxKB (returns ./oss/file/<file_id>)
     body, ctype = _encode_multipart(
         [("source_id", kb), ("source_type", "KNOWLEDGE")], "file", name, data
     )
@@ -536,7 +541,7 @@ async def _upload_via_workflow(ws: str, kb: str, name: str, data: bytes) -> str:
         file_url = file_url.get("url") or file_url.get("file_id")
     file_id = str(file_url).rstrip("/").split("/")[-1]
 
-    # 2. 提交知识库工作流处理
+    # 2. submit the knowledge workflow job
     payload = await maxkb_request(
         "POST",
         f"/workspace/{ws}/knowledge/{kb}/upload_document",
@@ -552,16 +557,16 @@ async def _upload_via_workflow(ws: str, kb: str, name: str, data: bytes) -> str:
     action_id = action.get("id")
     state = action.get("state", "STARTED")
     return (
-        f"已通过知识库工作流提交文档「{name}」(file_id: {file_id}, "
-        f"处理任务id: {action_id or '未返回'}, 状态: {state})。"
-        f"工作流处理为异步执行, 可稍后用 list_documents 查看结果或在 MaxKB 页面查看处理进度。"
+        f"Document '{name}' submitted via the knowledge workflow (file_id: {file_id}, "
+        f"task id: {action_id or 'none returned'}, state: {state}). "
+        f"The workflow runs asynchronously; check progress later with list_documents or in the MaxKB UI."
     )
 
 
 async def _upload_via_split(
     ws: str, kb: str, name: str, data: bytes, limit: int, patterns: list[str] | None, with_filter: bool
 ) -> str:
-    # 1. 分段预览
+    # 1. split preview
     fields: list[tuple[str, str]] = [("with_filter", "true" if with_filter else "false")]
     if limit and limit > 0:
         fields.append(("limit", str(limit)))
@@ -576,9 +581,9 @@ async def _upload_via_split(
     )
     segments = payload.get("data")
     if not isinstance(segments, list) or not segments:
-        raise ToolError("文件分段失败, 未返回分段结果: " + json.dumps(payload, ensure_ascii=False)[:300])
+        raise ToolError("File split failed, no segments returned: " + json.dumps(payload, ensure_ascii=False)[:300])
 
-    # 2. 组装段落并创建文档 (分段结果 -> paragraphs)
+    # 2. assemble paragraphs and create the document
     paragraphs = []
     for seg in segments:
         if not isinstance(seg, dict):
@@ -596,8 +601,8 @@ async def _upload_via_split(
         json_body=[{"name": name, "paragraphs": paragraphs}],
     )
     return (
-        f"文档「{name}」上传成功: 按知识库分段规则切分为 {len(paragraphs)} 个分段, "
-        f"已创建文档(向量化在后台异步进行)。"
+        f"Document '{name}' uploaded: split into {len(paragraphs)} segments by the "
+        f"knowledge base rules, document created (vectorization runs in background)."
     )
 
 
@@ -611,24 +616,26 @@ async def upload_document(
     patterns: list[str] | None = None,
     with_filter: bool = True,
 ) -> str:
-    """Upload a document file into the knowledge base and auto-split it into segments. 上传整个文件到知识库并自动智能分段(方式二)。
+    """Upload a document file into the knowledge base and auto-split it into segments.
 
-    文件来源二选一: file_path(服务器上的文件路径, 推荐 docker 部署时挂载目录) 或
-    content_base64 + file_name(直接传文件内容, 适合小文件)。
+    File source, either: file_path (path on the server; use the mounted directory
+    with docker) or content_base64 + file_name (inline content, good for small files).
 
-    mode 取值:
-      auto     自动判断: 工作流知识库走工作流智能分段, 普通知识库走规则分段
-      workflow 强制走知识库工作流(要求知识库为已发布的"工作流知识库")
-      split    强制走规则分段(可配合 limit=分段长度, patterns=分段正则, with_filter=清除特殊字符)
+    mode values:
+      auto     decide automatically: workflow knowledge bases use the workflow
+               smart split, regular ones use rule-based splitting
+      workflow force the knowledge workflow (requires a published workflow KB)
+      split    force rule-based splitting (limit = segment length,
+               patterns = split regex, with_filter = strip special characters)
     """
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
     name, data = _read_upload_source(file_path, file_name, content_base64)
     if len(data) > 100 * 1024 * 1024:
-        raise ToolError(f"文件过大({len(data) // 1024 // 1024}MB), 上传接口限制 100MB 以内")
+        raise ToolError(f"File too large ({len(data) // 1024 // 1024}MB), upload limit is 100MB")
 
     if mode not in ("auto", "workflow", "split"):
-        raise ToolError("mode 仅支持 auto / workflow / split")
+        raise ToolError("mode must be one of auto / workflow / split")
 
     use_workflow = {"workflow": True, "split": False}.get(mode)
     if use_workflow is None:
@@ -639,9 +646,9 @@ async def upload_document(
             return await _upload_via_workflow(ws, kb, name, data)
         except ToolError as e:
             raise ToolError(
-                f"工作流方式上传失败: {e}\n"
-                f"提示: 该方式要求知识库是已发布的「工作流知识库」; "
-                f"普通知识库请使用 mode=\"split\""
+                f"Workflow upload failed: {e}\n"
+                f"Hint: this mode requires a published workflow knowledge base; "
+                f'use mode="split" for regular knowledge bases'
             )
     return await _upload_via_split(ws, kb, name, data, limit, patterns, with_filter)
 
@@ -653,12 +660,13 @@ async def search_knowledge(
     similarity: float = 0.0,
     search_mode: str = "",
 ) -> str:
-    """Search the knowledge base directly (hit test) and return matched segments. 直接检索 MaxKB 知识库(命中测试), 返回命中的知识切片。
+    """Search the knowledge base directly (hit test) and return matched segments.
 
-    query 为检索文本; top_number 返回条数(默认 5); similarity 相似度阈值(默认 0.6);
-    search_mode 检索模式, 仅支持 embedding(嵌入/向量)、keywords(关键字)、blend(混合, 默认);
-    传入中文或别名会自动归一化, 无法识别的值自动回退 blend。
-    返回每个命中切片的相似度得分、标题、内容(以及所属文档)。
+    `query` is the search text; top_number = result count (default 5);
+    similarity = threshold (default 0.6); search_mode is one of
+    embedding (vector), keywords, blend (hybrid, default). Other spellings are
+    normalized automatically; unrecognized values fall back to blend.
+    Returns similarity score, title, content and source document per hit.
     """
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
@@ -678,9 +686,9 @@ async def search_knowledge(
         hits = []
 
     if not hits:
-        return f"未检索到相关内容 (知识库 {kb}, query: {query}, 阈值 {body['similarity']})"
+        return f"No matching segments (knowledge base {kb}, query: {query}, threshold {body['similarity']})"
 
-    lines = [f"检索到 {len(hits)} 条知识切片 (知识库 {kb}):"]
+    lines = [f"Found {len(hits)} segments (knowledge base {kb}):"]
     for i, h in enumerate(hits, 1):
         if not isinstance(h, dict):
             lines.append(f"{i}. {h}")
@@ -689,20 +697,21 @@ async def search_knowledge(
         title = h.get("title", "")
         doc = h.get("document_name", h.get("name", ""))
         content = str(h.get("content", ""))[:800]
-        head = f"{i}. [得分 {score}]"
+        head = f"{i}. [score {score}]"
         if title:
             head += f" {title}"
         if doc:
-            head += f" (文档: {doc})"
+            head += f" (document: {doc})"
         lines.append(head)
         lines.append("   " + content.replace("\n", "\n   "))
         pid, did = h.get("id"), h.get("document_id")
         if pid and did:
             lines.append(
-                f"   [段落ID: {pid} | 文档ID: {did} | 序号: {h.get('position', '')}]"
+                f"   [paragraph_id: {pid} | document_id: {did} | position: {h.get('position', '')}]"
             )
     lines.append(
-        "提示: 若上面切片缺少上下文, 可调用 get_segment_context 读取命中片段的前后相邻片段或整篇文档全文。"
+        "Tip: if a slice lacks context, call get_segment_context to read the "
+        "neighboring segments or the full document."
     )
     return "\n".join(lines)
 
@@ -711,8 +720,9 @@ _doc_names: dict[str, str] = {}
 
 
 async def _get_doc_name(ws: str, kb: str, doc_id: str) -> str:
-    """取文档名。MaxKB 分段接口(ParagraphSerializer)不返回 document_name,
-    且文档详情端点无 GET 方法, 因此从文档列表接口按 id 匹配(结果缓存)。"""
+    """Resolve a document name. MaxKB's paragraph endpoint does not return
+    document_name and the document detail endpoint has no GET, so match by id
+    against the document list (cached)."""
     if not doc_id:
         return ""
     ck = f"{kb}:{doc_id}"
@@ -727,16 +737,16 @@ async def _get_doc_name(ws: str, kb: str, doc_id: str) -> str:
             "",
         )
     except ToolError as e:
-        log.info("获取文档名失败(不影响主流程): %s", e)
+        log.info("Failed to resolve document name (non-fatal): %s", e)
     _doc_names[ck] = name
     return name
 
 
 async def _fetch_paragraphs(ws: str, kb: str, doc_id: str) -> list[dict]:
-    """读取某文档的全部分段(含完整 content), 按 position 升序。
+    """Read all segments of a document (full content), ordered by position.
 
-    MaxKB 接口: GET /workspace/{ws}/knowledge/{kb}/document/{doc}/paragraph (不分页)
-    老版本或超大文档不支持不分页时, 自动回退到分页接口逐页抓取。
+    MaxKB endpoint: GET /workspace/{ws}/knowledge/{kb}/document/{doc}/paragraph
+    (unpaged). Falls back to the paged endpoint for old versions or huge docs.
     """
     try:
         payload = await maxkb_request(
@@ -748,11 +758,11 @@ async def _fetch_paragraphs(ws: str, kb: str, doc_id: str) -> list[dict]:
             rows.sort(key=lambda r: (r.get("position") or 0, str(r.get("create_time") or "")))
             return rows
     except ToolError as e:
-        log.info("不分页分段接口不可用, 回退分页抓取: %s", e)
+        log.info("Unpaged paragraph endpoint unavailable, falling back to paging: %s", e)
 
     rows: list[dict] = []
     page, size, guard = 1, 100, 0
-    while guard < 60:  # 最多 6000 段, 防止无限循环
+    while guard < 60:  # hard cap 6000 segments, avoid infinite loops
         guard += 1
         try:
             payload = await maxkb_request(
@@ -774,7 +784,8 @@ async def _fetch_paragraphs(ws: str, kb: str, doc_id: str) -> list[dict]:
 
 
 async def _locate_by_paragraph_id(ws: str, kb: str, paragraph_id: str) -> tuple[str, list[dict], int] | None:
-    """仅有段落 ID 时, 遍历知识库下文档定位其所属文档与序号(最多扫描 200 个文档)。"""
+    """With only a paragraph id, scan the knowledge base documents (up to 200)
+    to find which document and position it belongs to."""
     try:
         payload = await maxkb_request(
             "GET", f"/workspace/{ws}/knowledge/{kb}/document/1/200"
@@ -798,17 +809,19 @@ async def _locate_by_paragraph_id(ws: str, kb: str, paragraph_id: str) -> tuple[
 def _build_context_window(
     rows: list[dict], center_idx: int, neighbors: int, max_chars: int
 ) -> tuple[list[tuple[int, dict]], int, int]:
-    """以 center_idx 为中心向前后各取 neighbors 段, 并做字符截断。
+    """Take `neighbors` segments on each side of center_idx and apply the
+    character cap.
 
-    返回 (选中的 [(下标, 段落)], 窗口原始段落数, 是否发生截断 1/0)。
-    截断策略: 优先保证命中段完整, 再按"就近优先"向外扩展, 超出 max_chars 即停止。
+    Returns (selected [(index, paragraph)], window size, truncated 1/0).
+    Truncation keeps the matched segment whole, then expands nearest-first and
+    stops once max_chars would be exceeded.
     """
     n = len(rows)
     lo = max(0, center_idx - max(0, neighbors))
     hi = min(n - 1, center_idx + max(0, neighbors))
     window = list(range(lo, hi + 1))
 
-    order = sorted(window, key=lambda i: abs(i - center_idx))  # 命中段 -> 近邻 -> 远邻
+    order = sorted(window, key=lambda i: abs(i - center_idx))  # hit -> near -> far
     picked: set[int] = set()
     used = 0
     truncated = 0
@@ -831,27 +844,30 @@ async def get_segment_context(
     max_chars: int = 0,
     full_document: bool = False,
 ) -> str:
-    """Read neighboring segments around a retrieved hit, or the full document text. 读取某个检索片段的前后相邻片段(上下文扩展), 或读取整篇文档全文。
+    """Read neighboring segments around a retrieved hit, or the full document text.
 
-    用途: search_knowledge 返回的切片只是文档中的一小段, 当据此回答不完整、
-    用户仍不满意时, 用本工具补齐上下文, 再重新组织回答。
-    定位方式(任选其一, 推荐第 1 种):
-      1. 传 search_knowledge 结果里标注的 段落ID + 文档ID (最准确);
-      2. 只传段落ID(paragraph_id), 程序会在知识库下逐文档查找(稍慢);
-      3. 传 document_id + full_document=true 直接读整篇文档;
-      4. 传 query, 程序先在知识库内检索一次, 取最高分片段再扩展上下文。
-    neighbors 为前后各扩展的分段数(-1 表示用环境变量默认值, 建议 1~3, 上限 20);
-    max_chars 为返回内容总字符上限(0 表示用默认值), 防止 token 暴增;
-    full_document=true 时读取整篇文档(从命中段落读到文档结尾, 仍受 max_chars 限制)。
-    注意: 仅在检索切片不足以回答时才调用本工具, 不要每次检索后都自动扩展上下文。
+    Use it when a search_knowledge slice is not enough to answer: expand the
+    context around the hit instead of re-answering from a single slice.
+    Locating the segment (pick one, the first is recommended):
+      1. pass paragraph_id + document_id as annotated in search_knowledge output;
+      2. pass paragraph_id only (the service scans documents, slightly slower);
+      3. pass document_id + full_document=true to read the whole document;
+      4. pass query: the service searches first, then expands the top hit.
+    neighbors = segments to include on each side (-1 = env default, suggest 1~3,
+    max 20); max_chars = total character cap (0 = env default) to avoid token
+    blow-ups; full_document=true reads from the matched segment to the end of
+    the document, still capped by max_chars.
+    Only call this when the retrieved slices are insufficient; do not expand
+    automatically after every search.
     """
     paragraph_id = (paragraph_id or "").strip()
     document_id = (document_id or "").strip()
-    # 先做纯参数校验, 避免无谓的网络往返
+    # pure argument validation first, avoid pointless network round-trips
     if not paragraph_id and not document_id and not (query or "").strip():
         raise ToolError(
-            "参数不足: 请至少提供 paragraph_id(search_knowledge 结果中的段落ID)、"
-            "document_id(配合 full_document 读全文)或 query(先检索再扩展)。"
+            "Missing arguments: provide at least one of paragraph_id (from "
+            "search_knowledge output), document_id (with full_document), or "
+            "query (search first, then expand)."
         )
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
@@ -863,7 +879,7 @@ async def get_segment_context(
     doc_name = ""
     hit_note = ""
 
-    # --- 方式 3 / 4 / 1 / 2 分支定位 ---
+    # --- locate via query / document_id / paragraph_id ---
     if not document_id and query and not paragraph_id:
         body = {
             "query_text": query,
@@ -878,54 +894,54 @@ async def get_segment_context(
         if isinstance(hits, dict):
             hits = hits.get("records") or hits.get("list") or []
         if not hits or not isinstance(hits[0], dict):
-            return f"未检索到与 query 相关的片段 (知识库 {kb}), 无法扩展上下文。"
+            return f"No segments matched the query (knowledge base {kb}); cannot expand context."
         top = hits[0]
         document_id = str(top.get("document_id") or "")
         paragraph_id = str(top.get("id") or "")
         doc_name = str(top.get("document_name") or "")
-        hit_note = f"先按 query 定位到最高分片段(得分 {top.get('similarity', top.get('comprehensive_score', ''))})"
+        hit_note = f"located the top-scoring segment via query (score {top.get('similarity', top.get('comprehensive_score', ''))})"
 
     if document_id:
         rows = await _fetch_paragraphs(ws, kb, document_id)
         if not rows:
             return (
-                f"该文档没有可读取的分段 (文档ID {document_id}, 知识库 {kb})。"
-                f"可能文档已被删除, 或 knowledge_base_id 与文档不匹配。"
+                f"Document has no readable segments (document_id {document_id}, knowledge base {kb}). "
+                f"It may have been deleted, or knowledge_base_id does not match the document."
             )
         if not doc_name:
             doc_name = await _get_doc_name(ws, kb, document_id)
-        # 定位中心段落
+        # locate the center segment
         if paragraph_id:
             center_idx = next(
                 (i for i, r in enumerate(rows) if str(r.get("id")) == paragraph_id), -1
             )
             if center_idx < 0:
                 center_idx = 0
-                hit_note = (hit_note + " | " if hit_note else "") + "段落ID 不在该文档内, 已按首段处理"
+                hit_note = (hit_note + " | " if hit_note else "") + "paragraph_id not found in this document; using the first segment"
         else:
             center_idx = 0
             if not full_document:
-                hit_note = (hit_note + " | " if hit_note else "") + "未给段落ID, 默认从第 1 段起读取"
+                hit_note = (hit_note + " | " if hit_note else "") + "no paragraph_id given; reading from segment 1"
     elif paragraph_id:
         found = await _locate_by_paragraph_id(ws, kb, paragraph_id)
         if not found:
             return (
-                f"在知识库 {kb} 的文档中未找到段落ID {paragraph_id}"
-                f"(已扫描该知识库下最多 200 个文档)。"
-                f"建议同时传入 document_id(取自 search_knowledge 结果标注), 或先用 list_documents 查文档ID。"
+                f"Paragraph {paragraph_id} not found in any document of knowledge base {kb} "
+                f"(scanned up to 200 documents). "
+                f"Pass document_id (from search_knowledge output) or list documents first."
             )
         document_id, rows, center_idx = found
         doc_name = await _get_doc_name(ws, kb, document_id)
     else:
-        # query 命中但返回体未带 document_id 的兜底
+        # query matched but the response carried no document_id
         return (
-            f"已定位到相关片段, 但未能确定其所属文档 (知识库 {kb})。"
-            f"请改用 paragraph_id + document_id(取自 search_knowledge 结果标注)再次调用。"
+            f"Located a matching segment but could not determine its document (knowledge base {kb}). "
+            f"Retry with paragraph_id + document_id from the search_knowledge output."
         )
 
-    # --- 组装输出 ---
+    # --- assemble output ---
     if full_document:
-        # 从命中段起向后读完剩余全文(而非从第 1 段重来), 且不带 neighbors 窗口
+        # read from the hit to the end of the document (not from segment 1)
         start = center_idx if paragraph_id else 0
         window = list(enumerate(rows))[start:]
         total_in_window = len(window)
@@ -934,8 +950,8 @@ async def get_segment_context(
         window, total_in_window, truncated = _build_context_window(rows, center_idx, nb, cap)
 
     out: list[str] = [
-        f"上下文扩展 (知识库 {kb} | 文档: {doc_name or document_id or '未知'}"
-        f" | 全文 {len(rows)} 段{'' if full_document else f' | 命中第 {center_idx + 1} 段'}):"
+        f"Context expansion (knowledge base {kb} | document: {doc_name or document_id or 'unknown'}"
+        f" | {len(rows)} segments total{'' if full_document else f' | hit at segment {center_idx + 1}'}):"
     ]
     if hit_note:
         out.append(f"  ({hit_note})")
@@ -946,17 +962,17 @@ async def get_segment_context(
         title = str(r.get("title") or "").strip()
         content = str(r.get("content") or "")
         if not r.get("is_active", True):
-            tag = "[已停用]"
+            tag = "[inactive]"
         else:
             tag = ""
-        marker = ">>> 命中片段 <<<" if (i == center_idx and not full_document) else f"第 {i + 1}/{len(rows)} 段"
+        marker = ">>> MATCHED SEGMENT <<<" if (i == center_idx and not full_document) else f"segment {i + 1}/{len(rows)}"
         head = f"\n--- {marker}{(' ' + title) if title else ''}{(' ' + tag) if tag else ''} ---"
         remain = cap - used
         if remain <= 0:
             cut = True
             break
         if len(content) > remain:
-            content = content[:remain] + " …(已截断)"
+            content = content[:remain] + " ...(truncated)"
             cut = True
         used += len(content) + len(title)
         out.append(head)
@@ -965,26 +981,26 @@ async def get_segment_context(
     if cut or truncated:
         if full_document:
             out.append(
-                f"\n(文档共 {len(rows)} 段, 因 max_chars={cap} 限制正文未输出完整。"
-                f"如需继续, 可提高 max_chars, 或改用 neighbors 窗口只取关注的片段。)"
+                f"\n(document has {len(rows)} segments; body cut off by max_chars={cap}. "
+                f"Raise max_chars, or use a neighbors window for the part you need.)"
             )
         else:
             extra = (
-                "部分分段正文被截断" if (cut and len(window) == total_in_window)
-                else f"窗口内 {total_in_window} 段中仅输出 {len(window)} 段"
+                "some segment bodies were truncated" if (cut and len(window) == total_in_window)
+                else f"only {len(window)} of {total_in_window} window segments emitted"
             )
             out.append(
-                f"\n(内容不完整: {extra}, 已达字符上限 {cap}。"
-                f"如需更多, 可提高 max_chars 或缩小 neighbors 后再次调用。)"
+                f"\n(incomplete: {extra}; character cap {cap} reached. "
+                f"Raise max_chars or lower neighbors and retry.)"
             )
     if not full_document and center_idx + nb >= len(rows) - 1:
-        out.append(f"(注: 已到达文档末尾, 后续无更多分段。)")
+        out.append("(note: reached the end of the document; no further segments.)")
     return "\n".join(out)
 
 
 
 # ----------------------------------------------------------------------------
-# 组装 MCP 服务器(双协议)
+# Assemble the MCP server (dual protocol)
 # ----------------------------------------------------------------------------
 mcp = MCPServer(SERVER_NAME)
 
@@ -1025,13 +1041,13 @@ async def health(request: Request) -> JSONResponse:
                 "streamable-http": "/mcp",
                 "sse": "/sse (POST /messages/)",
             },
-            "maxkb_base_url": BASE_URL or "(未配置)",
-            "maxkb_base_url_raw": BASE_URL_RAW or "(未配置)",
+            "maxkb_base_url": BASE_URL or "(unset)",
+            "maxkb_base_url_raw": BASE_URL_RAW or "(unset)",
             "credential": (
-                "api_key" if MAXKB_API_KEY else ("password" if MAXKB_USERNAME else "未配置!!")
+                "api_key" if MAXKB_API_KEY else ("password" if MAXKB_USERNAME else "not configured!!")
             ),
             "workspace_id": MAXKB_WORKSPACE_ID or "(auto)",
-            "default_knowledge_id": MAXKB_KNOWLEDGE_ID or "(未设置)",
+            "default_knowledge_id": MAXKB_KNOWLEDGE_ID or "(unset)",
         }
     )
 
@@ -1043,9 +1059,10 @@ async def lifespan(app):
         yield
 
 
-# 将两个子应用(streamable-http 与 sse)的路由直接嫁接到宿主应用。
-# 注意: 不能用 Mount("/mcp", ...), 因为 Starlette 的 Mount 不匹配不带尾斜杠的裸路径,
-# 而标准 MCP 客户端连接的就是 http://host:port/mcp。
+# Mount both sub-apps (streamable-http and sse) routes directly onto the host
+# app. Mount("/mcp", ...) cannot be used: Starlette's Mount does not match the
+# bare path without a trailing slash, while standard MCP clients connect to
+# http://host:port/mcp.
 app = Starlette(
     routes=[
         Route("/health", health, methods=["GET"]),
@@ -1074,7 +1091,7 @@ class BearerAuthMiddleware:
                         break
                 if auth.lower() != f"bearer {self.token}".lower().encode():
                     response = JSONResponse(
-                        {"error": "unauthorized, 请携带 Authorization: Bearer <MCP_AUTH_TOKEN>"},
+                        {"error": "unauthorized, send Authorization: Bearer <MCP_AUTH_TOKEN>"},
                         status_code=401,
                     )
                     await response(scope, receive, send)
@@ -1092,15 +1109,15 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     log.info("=" * 60)
-    log.info("MaxKB 知识库管理 MCP 服务器启动中")
-    log.info("  对外协议:  MCP(Streamable HTTP) http://%s:%s/mcp", HOST, PORT)
+    log.info("MaxKB Knowledge Base MCP server starting")
+    log.info("  protocols: MCP(Streamable HTTP) http://%s:%s/mcp", HOST, PORT)
     log.info("             SSE                   http://%s:%s/sse", HOST, PORT)
-    log.info("  健康检查:  http://%s:%s/health", HOST, PORT)
-    log.info("  MaxKB:     %s", BASE_URL or "未配置")
-    log.info("  凭据方式:  %s", "API Key" if MAXKB_API_KEY else ("账号密码" if MAXKB_USERNAME else "未配置!!"))
-    log.info("  工具:      list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge / get_segment_context")
+    log.info("  health:    http://%s:%s/health", HOST, PORT)
+    log.info("  MaxKB:     %s", BASE_URL or "unset")
+    log.info("  credential: %s", "API Key" if MAXKB_API_KEY else ("password" if MAXKB_USERNAME else "not configured!!"))
+    log.info("  tools:     list_knowledge_bases / list_documents / add_segment / upload_document / search_knowledge / get_segment_context")
     if not BASE_URL or not (MAXKB_API_KEY or MAXKB_USERNAME):
-        log.error("  !! BASE_URL 或凭据未配置, 工具调用将报错, 请检查环境变量")
+        log.error("  !! BASE_URL or credentials missing; tool calls will fail, check the environment")
     log.info("=" * 60)
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 

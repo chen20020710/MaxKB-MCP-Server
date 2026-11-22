@@ -1,46 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MaxKB 智能体对话 MCP 服务器（对接 MaxKB v2.x）
+MaxKB agent chat MCP server (MaxKB v2.x).
 
-功能:
-  - 通过 MaxKB 应用对话 API 与指定智能体对话（/chat/api/*）
-  - 同一进程同时提供两种传输协议:
+Features:
+  - Chat with a MaxKB application (agent) through the app chat API (/chat/api/*)
+  - One process serves both transports:
       * MCP Streamable HTTP:  http://<host>:<port>/mcp
-      * MCP SSE:               http://<host>:<port>/sse  (消息回传 /messages/)
-      * 健康检查:              http://<host>:<port>/health
+      * MCP SSE:               http://<host>:<port>/sse  (messages via /messages/)
+      * Health check:          http://<host>:<port>/health
 
-对接的 MaxKB 接口（均使用 Authorization: Bearer <应用API Key> 认证）:
-  - GET  {BASE_URL}/chat/api/open                        打开会话, 返回 chat_id
-  - POST {BASE_URL}/chat/api/chat_message/{chat_id}      发送消息
-  - POST {BASE_URL}/chat/api/application/{app_id}/chat/completions  (备用, OpenAI 兼容)
+MaxKB endpoints used (all with Authorization: Bearer <application API key>):
+  - GET  {BASE_URL}/chat/api/open                        open a session, returns chat_id
+  - POST {BASE_URL}/chat/api/chat_message/{chat_id}      send a message
+  - POST {BASE_URL}/chat/api/application/{app_id}/chat/completions  (fallback, OpenAI-compatible)
 
-环境变量:
-  BASE_URL          MaxKB 服务根地址, 如 http://<MAXKB_HOST>:8080        (必填)
-                    注意: 请勿填应用专属地址 http://host/chat/api/<应用ID>。
-                    服务会自动剥离 /chat|/admin 及其后的路径做归一化,
-                    但建议在 compose 中直接填根地址以免歧义。
-  API_KEY           【单智能体方式】应用 API Key, 如 agent-xxxxxxxx      (与 CHAT_AGENTS 二选一)
-  CHAT_AGENTS       【多智能体方式】一个进程注册多个对话工具, 格式:
-                      工具名:应用APIKey[:描述]|工具名2:应用APIKey2[:描述2]
-                    - 条目间用 | 分隔; 描述可省略(用默认文案), 描述内可含冒号(只在
-                      前两个字段切分); 描述内不要用 | 字符。
-                    - 工具名建议用 ASCII(字母/数字/下划线/连字符), 便于客户端分类,
-                      且不能与 API_KEY 方式生成的 TOOL_NAME 重复。
-                    - 每个智能体各自维护会话 chat_id, 互不串上下文。
-                    示例:
-                      CHAT_AGENTS=ops_chat:agent-aaa:运维专家, 回答VMware/机房问题|crm_chat:agent-bbb
-                    两个变量可同时配置(API_KEY 生成 TOOL_NAME 工具, CHAT_AGENTS 追加其余工具)。
-  SERVER_NAME       MCP 服务器名称(展示用)
-  TOOL_NAME         单智能体方式下的工具名, 默认 maxkb_chat
-  TOOL_DESCRIPTION  单智能体方式下的工具描述(会展示给调用方 AI)
-  MAXKB_CHAT_PREFIX MaxKB 聊天 API 前缀, 默认 /chat
-  MAXKB_TIMEOUT     调用 MaxKB 的超时时间(秒), 默认 180
-  HOST / PORT       监听地址与端口, 默认 0.0.0.0:8000
-  MCP_AUTH_TOKEN    可选, 设置后调用 /mcp、/sse、/messages 需携带
+Environment variables:
+  BASE_URL          MaxKB service root, e.g. http://<MAXKB_HOST>:8080        (required)
+                    Do NOT use the per-app address http://host/chat/api/<app-id>.
+                    The service strips /chat|/admin suffixes automatically,
+                    but setting the bare root in compose avoids ambiguity.
+  API_KEY           [single agent] application API key, e.g. agent-xxxxxxxx
+                    (either this or CHAT_AGENTS)
+  CHAT_AGENTS       [multi agent] register several chat tools in one process:
+                      tool_name:app_api_key[:description]|tool_name2:key2[:desc2]
+                    - entries separated by |; description optional (default
+                      text used), may contain colons (only the first two fields
+                      are split); do not use | inside a description.
+                    - tool names should be ASCII (letters/digits/_/-/.) for
+                      client-side classification and must not duplicate the
+                      TOOL_NAME produced by API_KEY.
+                    - each agent keeps its own chat_id; contexts never mix.
+                    Example:
+                      CHAT_AGENTS=ops_chat:agent-aaa:ops expert for VMware questions|crm_chat:agent-bbb
+                    Both variables may be set together (API_KEY yields the
+                    TOOL_NAME tool, CHAT_AGENTS appends the rest).
+  SERVER_NAME       MCP server display name
+  TOOL_NAME         tool name in single-agent mode, default maxkb_chat
+  TOOL_DESCRIPTION  tool description shown to the calling AI
+  MAXKB_CHAT_PREFIX MaxKB chat API prefix, default /chat
+  MAXKB_TIMEOUT     MaxKB call timeout (seconds), default 180
+  HOST / PORT       bind address and port, default 0.0.0.0:8000
+  MCP_AUTH_TOKEN    optional; when set, /mcp, /sse, /messages require
                     Authorization: Bearer <MCP_AUTH_TOKEN>
-  MCP_ALLOWED_HOSTS 允许的 Host 头白名单, 逗号分隔; 默认 * 表示不校验
-                    (例如: your-host:18010,localhost:8000)
+  MCP_ALLOWED_HOSTS Host header allow-list, comma separated; default * (no check)
+                    (e.g. your-host:18010,localhost:8000)
 """
 import json
 import logging
@@ -65,7 +69,7 @@ log = logging.getLogger("maxkb-chat-mcp")
 
 
 # ----------------------------------------------------------------------------
-# 配置
+# Configuration
 # ----------------------------------------------------------------------------
 def _env(key: str, default: str | None = None) -> str | None:
     v = os.getenv(key)
@@ -73,13 +77,14 @@ def _env(key: str, default: str | None = None) -> str | None:
 
 
 def _normalize_base_url(raw: str) -> str:
-    """把 BASE_URL 归一化成 MaxKB 服务根地址。
+    """Normalize BASE_URL to the MaxKB service root.
 
-    MaxKB 应用设置页常给出形如
+    The MaxKB app settings page often shows a per-app address like
         http://host:8080/chat/api/<application_id>
-    的「应用专属地址」; 若把它直接当 BASE_URL, 本服务再拼 /chat/api/open 就会变成
+    If that is used as BASE_URL, appending /chat/api/open again yields
         .../chat/api/<id>/chat/api/open  -> 404 HTTP_404_NOT_FOUND
-    这里统一剥离 /chat、/admin 及其后的 API/UI 路径, 只保留可配置的反向代理前缀。
+    Here we strip /chat, /admin and everything after them, keeping only an
+    optional reverse-proxy prefix.
     """
     raw = (raw or "").strip()
     if not raw:
@@ -101,11 +106,11 @@ BASE_URL_RAW = (_env("BASE_URL") or "").rstrip("/")
 BASE_URL = _normalize_base_url(BASE_URL_RAW)
 API_KEY = _env("API_KEY", "")
 CHAT_PREFIX = (_env("MAXKB_CHAT_PREFIX", "/chat")).rstrip("/")
-SERVER_NAME = _env("SERVER_NAME", "MaxKB 智能体对话 MCP 服务器")
+SERVER_NAME = _env("SERVER_NAME", "MaxKB Agent Chat MCP Server")
 TOOL_NAME = _env("TOOL_NAME", "maxkb_chat")
 TOOL_DESCRIPTION = _env(
     "TOOL_DESCRIPTION",
-    "发送消息给 MaxKB 智能体并获取回答",
+    "Ask and get answers from the MaxKB agent.",
 )
 CHAT_AGENTS_RAW = _env("CHAT_AGENTS", "")
 MAXKB_TIMEOUT = float(_env("MAXKB_TIMEOUT", "180"))
@@ -114,12 +119,12 @@ PORT = int(_env("PORT", "8000"))
 MCP_AUTH_TOKEN = _env("MCP_AUTH_TOKEN")
 ALLOWED_HOSTS_RAW = _env("MCP_ALLOWED_HOSTS", "*")
 
-DEFAULT_AGENT_DESC = "发送消息给 MaxKB 智能体并获取回答"
+DEFAULT_AGENT_DESC = "Ask and get answers from the MaxKB agent."
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+$")
 
 
 class AgentConfig:
-    """一个智能体 = 一个对话工具: 工具名 + 应用 API Key + 描述。"""
+    """One agent = one chat tool: tool name + application API key + description."""
 
     __slots__ = ("tool_name", "api_key", "description", "chat_id")
 
@@ -127,11 +132,11 @@ class AgentConfig:
         self.tool_name = tool_name
         self.api_key = api_key
         self.description = description
-        self.chat_id: str | None = None  # 每个智能体独立维护会话上下文
+        self.chat_id: str | None = None  # each agent keeps its own session
 
 
 def _parse_agents(raw: str) -> list[AgentConfig]:
-    """解析 CHAT_AGENTS=名:Key[:描述]|名2:Key2 格式; 配置错误时启动即报错(fail-fast)。"""
+    """Parse CHAT_AGENTS=name:key[:desc]|name2:key2; bad config fails at startup."""
     agents: list[AgentConfig] = []
     for item in (raw or "").split("|"):
         item = item.strip()
@@ -140,13 +145,13 @@ def _parse_agents(raw: str) -> list[AgentConfig]:
         parts = item.split(":", 2)
         if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
             raise RuntimeError(
-                f"CHAT_AGENTS 条目格式错误(应为 工具名:应用APIKey[:描述]): {item!r}"
+                f"Invalid CHAT_AGENTS entry (expected tool_name:app_api_key[:description]): {item!r}"
             )
         name, key = parts[0].strip(), parts[1].strip()
         desc = parts[2].strip() if len(parts) > 2 and parts[2].strip() else DEFAULT_AGENT_DESC
         if not _TOOL_NAME_RE.match(name):
             raise RuntimeError(
-                f"CHAT_AGENTS 工具名只允许字母/数字/下划线/连字符/点(建议 ASCII): {name!r}"
+                f"CHAT_AGENTS tool name may only contain letters/digits/underscore/hyphen/dot (ASCII recommended): {name!r}"
             )
         agents.append(AgentConfig(name, key, desc))
     return agents
@@ -160,13 +165,13 @@ if API_KEY:
     _seen_names.add(TOOL_NAME)
 for ag in _parse_agents(CHAT_AGENTS_RAW):
     if ag.tool_name in _seen_names:
-        raise RuntimeError(f"工具名重复: {ag.tool_name} (检查 API_KEY/TOOL_NAME 与 CHAT_AGENTS 是否冲突)")
+        raise RuntimeError(f"Duplicate tool name: {ag.tool_name} (check API_KEY/TOOL_NAME vs CHAT_AGENTS)")
     _seen_names.add(ag.tool_name)
     AGENT_LIST.append(ag)
 
 
 # ----------------------------------------------------------------------------
-# MaxKB 客户端
+# MaxKB client
 # ----------------------------------------------------------------------------
 _client: httpx.AsyncClient | None = None
 
@@ -183,17 +188,17 @@ def auth_headers(api_key: str) -> dict:
 
 
 def parse_payload(resp: httpx.Response) -> dict:
-    """解析 MaxKB 响应。MaxKB 的业务码包装在 HTTP 200 里: {"code":200,"message":..,"data":..}"""
+    """Parse a MaxKB response. Business codes are wrapped in HTTP 200: {"code":200,...}"""
     try:
         payload = resp.json()
     except Exception:
-        raise ToolError(f"MaxKB 返回了非 JSON 内容 (HTTP {resp.status_code}): {resp.text[:300]}")
+        raise ToolError(f"MaxKB returned non-JSON content (HTTP {resp.status_code}): {resp.text[:300]}")
     if not isinstance(payload, dict):
         return {"data": payload}
     if resp.status_code == 401 or payload.get("code") in (1002, 1003):
         raise ToolError(
-            f"MaxKB 认证失败 ({payload.get('code', resp.status_code)}): "
-            f"{payload.get('message', '请检查 API_KEY 是否正确')} "
+            f"MaxKB authentication failed ({payload.get('code', resp.status_code)}): "
+            f"{payload.get('message', 'check whether API_KEY is correct')} "
             f"[HTTP {resp.status_code}] {resp.text[:200]}"
         )
     code = payload.get("code")
@@ -201,19 +206,20 @@ def parse_payload(resp: httpx.Response) -> dict:
         hint = ""
         if code == 404 or resp.status_code == 404:
             hint = (
-                " | 404 通常是 BASE_URL 填错: 应填 MaxKB 根地址(如 http://host:8080), "
-                "不要填应用设置页复制的 /chat/api/<应用ID> 专属地址。"
-                f"当前生效地址: {BASE_URL}, 请求: {resp.request.url}"
+                " | 404 usually means BASE_URL is wrong: use the MaxKB root "
+                "(e.g. http://host:8080), not the per-app address "
+                "/chat/api/<app-id> copied from the app settings page. "
+                f"Effective base: {BASE_URL}, request: {resp.request.url}"
             )
         raise ToolError(
-            f"MaxKB 调用失败 [{code}]: {payload.get('message', '')} "
+            f"MaxKB call failed [{code}]: {payload.get('message', '')} "
             f"[HTTP {resp.status_code}]{hint}"
         )
     return payload
 
 
 def extract_answer(payload: Any) -> str:
-    """从 chat_message / chat/completions 的响应中提取回答文本(兼容多种返回结构)。"""
+    """Extract the answer text from chat_message / chat/completions responses."""
     data = payload.get("data", payload) if isinstance(payload, dict) else payload
 
     candidates: list[Any] = []
@@ -233,9 +239,9 @@ def extract_answer(payload: Any) -> str:
                 candidates.append(msg.get("content"))
 
     _collect(data)
-    _collect(payload)  # 兼容没有 data 包装的情况
+    _collect(payload)  # tolerate responses without the data wrapper
 
-    # 流式分片聚合格式: {"data": [{"content": "x"}, ...]} 或顶层即为分片列表
+    # streamed chunk aggregation: {"data": [{"content": "x"}, ...]} or a bare list
     if isinstance(data, list):
         joined = "".join(
             c.get("content", "") for c in data if isinstance(c, dict) and c.get("content")
@@ -247,11 +253,11 @@ def extract_answer(payload: Any) -> str:
         if isinstance(c, str) and c.strip():
             return c
 
-    raise ToolError("无法从 MaxKB 响应中解析回答内容，原始返回: " + json.dumps(payload, ensure_ascii=False)[:1500])
+    raise ToolError("Could not parse an answer from the MaxKB response, raw: " + json.dumps(payload, ensure_ascii=False)[:1500])
 
 
 # ----------------------------------------------------------------------------
-# 会话管理: 每个智能体(agent)独立维护 chat_id, 互不串上下文
+# Session management: each agent keeps its own chat_id, contexts never mix
 # ----------------------------------------------------------------------------
 async def _open_chat(api_key: str) -> str:
     resp = await get_client().get(
@@ -265,7 +271,7 @@ async def _open_chat(api_key: str) -> str:
         for k in ("chat_id", "id"):
             if data.get(k):
                 return str(data[k])
-    raise ToolError("打开会话失败(未返回 chat_id): " + json.dumps(payload, ensure_ascii=False)[:300])
+    raise ToolError("Failed to open a session (no chat_id returned): " + json.dumps(payload, ensure_ascii=False)[:300])
 
 
 async def _send_message(api_key: str, chat_id: str, message: str) -> dict:
@@ -278,14 +284,14 @@ async def _send_message(api_key: str, chat_id: str, message: str) -> dict:
 
 
 def _make_chat_tool(agent: AgentConfig):
-    """为一个智能体生成专属对话工具函数(闭包持有 agent 以隔离会话状态)。"""
+    """Build the chat tool function for one agent (closure isolates its session)."""
 
     async def chat(message: str, new_chat: bool = False, chat_id: str = "") -> str:
-        """发送消息给 MaxKB 智能体并获取回答。"""
+        """Send a message to the MaxKB agent and return its answer."""
         if not BASE_URL:
-            raise ToolError("未配置 BASE_URL，请在环境变量中设置 MaxKB 服务地址")
+            raise ToolError("BASE_URL is not configured; set the MaxKB service address in the environment")
         if not agent.api_key:
-            raise ToolError(f"智能体 {agent.tool_name} 未配置应用 API Key")
+            raise ToolError(f"Agent {agent.tool_name} has no application API key configured")
         try:
             cid = (chat_id or "").strip() or None
             if cid is None:
@@ -297,8 +303,10 @@ def _make_chat_tool(agent: AgentConfig):
                 payload = await _send_message(agent.api_key, cid, message)
             except ToolError as e:
                 msg = str(e)
-                # 会话不存在/已过期时自动重开一个会话并重试一次
-                if "会话" in msg or "conversation" in msg.lower():
+                # session missing/expired: open a new one and retry once.
+                # MaxKB may phrase this in Chinese or English, match both.
+                low = msg.lower()
+                if "会话" in msg or "session" in low or "conversation" in low:
                     agent.chat_id = await _open_chat(agent.api_key)
                     cid = agent.chat_id
                     payload = await _send_message(agent.api_key, cid, message)
@@ -309,34 +317,35 @@ def _make_chat_tool(agent: AgentConfig):
             agent.chat_id = cid
             return f"{answer}\n\n[chat_id: {cid}]"
         except httpx.TimeoutException:
-            raise ToolError(f"MaxKB 请求超时({MAXKB_TIMEOUT}s)，可在环境变量 MAXKB_TIMEOUT 中调大")
+            raise ToolError(f"MaxKB request timed out ({MAXKB_TIMEOUT}s); raise MAXKB_TIMEOUT if the agent is slow")
         except httpx.HTTPError as e:
-            raise ToolError(f"无法连接 MaxKB ({BASE_URL}): {e}")
+            raise ToolError(f"Cannot connect to MaxKB ({BASE_URL}): {e}")
         except ToolError:
             raise
         except Exception as e:
-            raise ToolError(f"调用 MaxKB 对话接口出错: {type(e).__name__}: {e}")
+            raise ToolError(f"Error calling the MaxKB chat API: {type(e).__name__}: {e}")
 
     chat.__name__ = agent.tool_name
     return chat
 
 
-# 兼容旧接口: 单智能体模式下仍提供 maxkb_chat 名字供测试/调用
+# Backwards-compatible alias: single-agent mode still exposes maxkb_chat
 maxkb_chat = _make_chat_tool(AGENT_LIST[0]) if AGENT_LIST else None
 
 
 # ----------------------------------------------------------------------------
-# 组装 MCP 服务器(双协议)
+# Assemble the MCP server (dual protocol)
 # ----------------------------------------------------------------------------
 mcp = MCPServer(SERVER_NAME)
 
 _PARAM_HINT = (
-    "\n\n参数说明: message=要发送的消息内容; new_chat=true 时新开一个对话(默认 false, "
-    "自动延续本智能体最近一次对话上下文); chat_id=传入已有对话 id 以在该对话中继续。"
+    "\n\nArguments: message = the text to send; new_chat = true starts a fresh "
+    "conversation (default false, this agent's latest conversation is reused); "
+    "chat_id = continue an existing conversation by id."
 )
 
 if not AGENT_LIST:
-    log.warning("未配置任何智能体(API_KEY 与 CHAT_AGENTS 均为空), 对话工具将不可用")
+    log.warning("No agents configured (API_KEY and CHAT_AGENTS are both empty); chat tools unavailable")
 
 for _agent in AGENT_LIST:
     _fn = _make_chat_tool(_agent)
@@ -346,12 +355,12 @@ for _agent in AGENT_LIST:
 def _build_security() -> TransportSecuritySettings:
     hosts = [h.strip() for h in ALLOWED_HOSTS_RAW.split(",") if h.strip()]
     if not hosts or hosts == ["*"]:
-        # 内网/默认场景: 关闭 DNS 重绑定保护, 任意 Host 均可访问
+        # internal/default scenario: disable DNS rebinding protection, any Host allowed
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,
-        allowed_origins=[],  # 非浏览器客户端不携带 Origin 头, 默认放行
+        allowed_origins=[],  # non-browser clients send no Origin header; allow by default
     )
 
 
@@ -371,10 +380,10 @@ async def health(request: Request) -> JSONResponse:
                 "streamable-http": "/mcp",
                 "sse": "/sse (POST /messages/)",
             },
-            "maxkb_base_url": BASE_URL or "(未配置)",
-            "maxkb_base_url_raw": BASE_URL_RAW or "(未配置)",
-            "maxkb_open_url": f"{BASE_URL}{CHAT_PREFIX}/api/open" if BASE_URL else "(未配置)",
-            # 只回显是否已配置与当前会话 id, 不回显任何密钥
+            "maxkb_base_url": BASE_URL or "(unset)",
+            "maxkb_base_url_raw": BASE_URL_RAW or "(unset)",
+            "maxkb_open_url": f"{BASE_URL}{CHAT_PREFIX}/api/open" if BASE_URL else "(unset)",
+            # only echo whether keys are set and current session ids, never the keys
             "agents": [
                 {"tool": a.tool_name, "api_key_set": bool(a.api_key), "chat_id": a.chat_id}
                 for a in AGENT_LIST
@@ -385,15 +394,16 @@ async def health(request: Request) -> JSONResponse:
 
 @asynccontextmanager
 async def lifespan(app):
-    # 挂载的子应用 lifespan 不会执行, 必须由宿主应用启动 session_manager
+    # mounted sub-app lifespans never run; the host app must start session_manager
     async with mcp.session_manager.run():
         log.info("MCP session manager started")
         yield
 
 
-# 将两个子应用(streamable-http 与 sse)的路由直接嫁接到宿主应用。
-# 注意: 不能用 Mount("/mcp", ...), 因为 Starlette 的 Mount 不匹配不带尾斜杠的裸路径,
-# 而标准 MCP 客户端连接的就是 http://host:port/mcp。
+# Mount both sub-apps (streamable-http and sse) routes directly onto the host
+# app. Mount("/mcp", ...) cannot be used: Starlette's Mount does not match the
+# bare path without a trailing slash, while standard MCP clients connect to
+# http://host:port/mcp.
 app = Starlette(
     routes=[
         Route("/health", health, methods=["GET"]),
@@ -405,7 +415,7 @@ app = Starlette(
 
 
 # ----------------------------------------------------------------------------
-# 可选的访问令牌校验(纯 ASGI 中间件)
+# Optional access token check (plain ASGI middleware)
 # ----------------------------------------------------------------------------
 class BearerAuthMiddleware:
     PROTECTED_PREFIXES = ("/mcp", "/sse", "/messages")
@@ -424,7 +434,7 @@ class BearerAuthMiddleware:
                         auth = v
                         break
                 if auth.lower() != f"bearer {self.token}".lower().encode():
-                    response = JSONResponse({"error": "unauthorized, 请携带 Authorization: Bearer <MCP_AUTH_TOKEN>"}, status_code=401)
+                    response = JSONResponse({"error": "unauthorized, send Authorization: Bearer <MCP_AUTH_TOKEN>"}, status_code=401)
                     await response(scope, receive, send)
                     return
         await self.asgi_app(scope, receive, send)
@@ -440,16 +450,16 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     log.info("=" * 60)
-    log.info("MaxKB 智能体对话 MCP 服务器启动中")
-    log.info("  对外协议:  MCP(Streamable HTTP) http://%s:%s/mcp", HOST, PORT)
+    log.info("MaxKB Agent Chat MCP server starting")
+    log.info("  protocols: MCP(Streamable HTTP) http://%s:%s/mcp", HOST, PORT)
     log.info("             SSE                   http://%s:%s/sse", HOST, PORT)
-    log.info("  健康检查:  http://%s:%s/health", HOST, PORT)
-    log.info("  MaxKB:     %s", BASE_URL or "未配置")
-    log.info("  智能体:    %d 个 -> %s", len(AGENT_LIST), " / ".join(a.tool_name for a in AGENT_LIST) or "(未配置!!)")
+    log.info("  health:    http://%s:%s/health", HOST, PORT)
+    log.info("  MaxKB:     %s", BASE_URL or "unset")
+    log.info("  agents:    %d -> %s", len(AGENT_LIST), " / ".join(a.tool_name for a in AGENT_LIST) or "(none configured!!)")
     if not BASE_URL:
-        log.error("  !! BASE_URL 未配置, 工具调用将报错, 请检查环境变量")
+        log.error("  !! BASE_URL is not configured; tool calls will fail, check the environment")
     if not AGENT_LIST:
-        log.error("  !! API_KEY 与 CHAT_AGENTS 均未配置, 没有可用对话工具, 请检查环境变量")
+        log.error("  !! Neither API_KEY nor CHAT_AGENTS is configured; no chat tools available")
     log.info("=" * 60)
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
