@@ -1,23 +1,24 @@
 # =============================================================================
-# MaxKB MCP Server — 双服务统一编排
+# MaxKB MCP Server — unified compose for both services
 # -----------------------------------------------------------------------------
-# 所有可变配置均从同目录的 .env 读取, 请勿在本文件里写死任何凭据。
+# All configurable values come from the .env file next to this one.
+# Never hard-code credentials in this file.
 #
-#   cp .env.example .env        # 首次部署: 复制模板
-#   vim .env                    # 填入 MaxKB 地址与凭据
+#   cp .env.example .env        # first deploy: copy the template
+#   edit .env                   # fill in MaxKB URL and credentials
 #   docker compose up -d --build
 #
-# 只想启动其中一个服务:
-#   docker compose up -d --build chat          # 仅智能体对话
-#   docker compose up -d --build knowledge     # 仅知识库管理
+# Start only one service:
+#   docker compose up -d --build chat          # agent chat only
+#   docker compose up -d --build knowledge     # knowledge base only
 #
-# .env 已被 .gitignore 忽略, 严禁提交到 Git 仓库。
+# .env is git-ignored — never commit it.
 # =============================================================================
 services:
   # ---------------------------------------------------------------------------
-  # 服务 1: 智能体对话 MCP 服务器
-  #   工具: maxkb_chat (名称可通过 CHAT_TOOL_NAME 定制)
-  #   端点: /mcp (Streamable HTTP) | /sse (SSE) | /health
+  # Service 1: agent chat MCP server
+  #   Tools: maxkb_chat (+ one tool per extra entry in CHAT_AGENTS)
+  #   Endpoints: /mcp (Streamable HTTP) | /sse (SSE) | /health
   # ---------------------------------------------------------------------------
   chat:
     build:
@@ -29,12 +30,12 @@ services:
     ports:
       - "${CHAT_PORT:-18010}:8000"
     environment:
-      # ---- 必填, 见 .env.example ----
+      # ---- required, see .env.example ----
       BASE_URL: ${MAXKB_BASE_URL:-}
       API_KEY: ${CHAT_API_KEY:-}
-      # ---- 多智能体(可选): 一个进程注册多个对话工具 ----
+      # ---- optional: multiple agents in one process ----
       CHAT_AGENTS: ${CHAT_AGENTS:-}
-      # ---- 可选, 留空则由程序使用内置默认值 ----
+      # ---- optional: empty value = program built-in default ----
       SERVER_NAME: ${CHAT_SERVER_NAME:-}
       TOOL_NAME: ${CHAT_TOOL_NAME:-}
       TOOL_DESCRIPTION: ${CHAT_TOOL_DESCRIPTION:-}
@@ -53,10 +54,10 @@ services:
       start_period: 10s
 
   # ---------------------------------------------------------------------------
-  # 服务 2: 知识库管理 MCP 服务器
-  #   工具: list_knowledge_bases / list_documents /
-  #         add_segment / upload_document / search_knowledge
-  #   端点: /mcp (Streamable HTTP) | /sse (SSE) | /health
+  # Service 2: knowledge base MCP server
+  #   Tools: list_knowledge_bases / list_documents / add_segment /
+  #          upload_document / search_knowledge / get_segment_context
+  #   Endpoints: /mcp (Streamable HTTP) | /sse (SSE) | /health
   # ---------------------------------------------------------------------------
   knowledge:
     build:
@@ -68,13 +69,13 @@ services:
     ports:
       - "${KB_PORT:-18011}:8000"
     environment:
-      # ---- 必填 ----
+      # ---- required ----
       BASE_URL: ${MAXKB_BASE_URL:-}
-      # ---- 凭据二选一: 优先 KB_API_KEY, 未填则用账号密码登录 ----
+      # ---- credential: either KB_API_KEY (preferred) or username/password ----
       MAXKB_API_KEY: ${KB_API_KEY:-}
       MAXKB_USERNAME: ${KB_USERNAME:-}
       MAXKB_PASSWORD: ${KB_PASSWORD:-}
-      # ---- 可选 ----
+      # ---- optional ----
       MAXKB_WORKSPACE_ID: ${KB_WORKSPACE_ID:-}
       MAXKB_KNOWLEDGE_ID: ${KB_KNOWLEDGE_ID:-}
       SERVER_NAME: ${KB_SERVER_NAME:-}
@@ -91,7 +92,7 @@ services:
       PORT: 8000
     restart: always
     volumes:
-      # upload_document 工具的 file_path 以 /app/data 开头; 宿主目录自动创建
+      # upload_document's file_path starts with /app/data; host dir auto-created
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
