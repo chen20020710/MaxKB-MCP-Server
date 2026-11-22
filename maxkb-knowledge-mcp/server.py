@@ -409,7 +409,7 @@ async def add_segment(
     - with document_id: append the segment to that existing document;
     - without document_id: create a new document (named by document_name,
       falling back to title or an auto-generated name) holding this segment.
-    `problems` is an optional list of synonymous questions that improve recall.
+    `problems` optionally adds synonymous questions that improve recall.
     """
     ws = await get_workspace_id()
     kb = await resolve_kb(knowledge_base_id)
