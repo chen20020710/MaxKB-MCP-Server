@@ -2,7 +2,9 @@
 
 MCP tools for [MaxKB](https://github.com/1Panel-dev/MaxKB) v2.x — agent chat and knowledge base management. Plug them into any MCP client (WorkBuddy, LiteLLM, Claude Desktop, Cursor, ...).
 
-Both services speak **MCP Streamable HTTP** and **SSE** over plain HTTP, run as two containers via Docker Compose, and take all credentials from `.env` — nothing is baked into images or code.
+Both services speak **MCP Streamable HTTP** and **SSE** over plain HTTP, take all credentials from `.env`, and run either via Docker Compose or with plain `docker run` — no compose required.
+
+Current version: **2.0.0** (image tags `maxkb-mcp-chat:2.0.0`, `maxkb-mcp-knowledge:2.0.0`).
 
 ## Services
 
@@ -15,7 +17,7 @@ Each service exposes `/mcp` (Streamable HTTP, recommended), `/sse` (legacy SSE) 
 
 ## Prerequisites
 
-- Docker + Docker Compose v2
+- Docker (Compose v2 is optional — see *Run with plain docker* below)
 - A reachable MaxKB v2.x instance
 - Two credentials:
   - Chat: MaxKB **application API key** (App → Publish/Settings → API Key; prefix `agent-` on v2.10+, `application-` on older builds)
@@ -38,6 +40,44 @@ curl http://127.0.0.1:18011/health
 > Which agent you talk to is decided entirely by `CHAT_API_KEY` — one key = one agent, never by the URL.
 
 Every other variable is optional; each one is documented inline in `.env.example`.
+
+## Run with plain docker (no compose)
+
+`start.sh` reads the same `.env` file and launches the containers with plain `docker run` — nothing but Docker is required.
+
+Build the images once (source needed), then start:
+
+```bash
+docker build -t maxkb-mcp-chat:2.0.0      maxkb-chat-mcp
+docker build -t maxkb-mcp-knowledge:2.0.0 maxkb-knowledge-mcp
+./start.sh all                            # or: chat | kb | stop | status
+```
+
+No source, no internet at all? Load prebuilt images from the release bundle instead of building:
+
+```bash
+gunzip -c maxkb-mcp-chat-2.0.0.tar.gz      | docker load
+gunzip -c maxkb-mcp-knowledge-2.0.0.tar.gz | docker load
+./start.sh all
+```
+
+The two commands `start.sh` runs for you, in full — paste them directly if you prefer:
+
+```bash
+docker run -d --name maxkbv2-mcp-app --restart always -p 18010:8000 \
+  -e BASE_URL="http://<maxkb-host>:8080" \
+  -e API_KEY="<app..." \
+  maxkb-mcp-chat:2.0.0
+
+docker run -d --name maxkbv2-knowledge-mcp-app --restart always -p 18011:8000 \
+  -v "$(pwd)/data:/app/data" \
+  -e BASE_URL="http://<maxkb-host>:8080" \
+  -e MAXKB_USERNAME="admin" -e MAXKB_PASSWORD="***" \
+  -e MAXKB_KNOWLEDGE_ID="<knowledge-base-id>" \
+  maxkb-mcp-knowledge:2.0.0
+```
+
+Note the environment variable names in `docker run` are the container-side names (`BASE_URL`, `API_KEY`, `MAXKB_*`); `start.sh` maps them from the user-facing `.env` names (`MAXKB_BASE_URL`, `CHAT_API_KEY`, `KB_*`) for you. Only the variables you actually set matter — the rest have defaults.
 
 ## Use
 
@@ -78,6 +118,15 @@ docker compose down
 docker compose up -d --build       # after code changes
 ```
 
+Plain docker mode (without compose):
+
+```bash
+./start.sh status                  # containers + health
+./start.sh all                     # (re)start both from current .env
+./start.sh stop                    # remove containers (./data kept)
+docker logs -f maxkbv2-mcp-app     # logs
+```
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -100,7 +149,8 @@ docker compose up -d --build       # after code changes
 MaxKB-MCP-Server/
 ├── .env.example            # config template with inline docs (safe to commit)
 ├── .gitignore
-├── docker-compose.yml      # single entrypoint for both services
+├── docker-compose.yml      # compose entrypoint for both services
+├── start.sh                # plain `docker run` launcher (no compose needed)
 ├── maxkb-chat-mcp/         # server.py + Dockerfile
 └── maxkb-knowledge-mcp/    # server.py + Dockerfile
 ```

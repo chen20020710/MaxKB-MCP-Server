@@ -25,7 +25,7 @@ services:
       context: ./maxkb-chat-mcp
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
-    image: maxkb-mcp-chat:1.0.0
+    image: maxkb-mcp-chat:2.0.0
     container_name: maxkbv2-mcp-app
     ports:
       - "${CHAT_PORT:-18010}:8000"
@@ -64,7 +64,7 @@ services:
       context: ./maxkb-knowledge-mcp
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
-    image: maxkb-mcp-knowledge:1.0.0
+    image: maxkb-mcp-knowledge:2.0.0
     container_name: maxkbv2-knowledge-mcp-app
     ports:
       - "${KB_PORT:-18011}:8000"
